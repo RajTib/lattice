@@ -206,12 +206,18 @@ streamlit run app.py
 
 The dashboard provides:
 
-- **Overview**: run status, processing totals, analyzed window time, average and peak rates, skipped packets, and cooldown suppressions
-- **Traffic analytics**: packet and byte rate timelines, protocol distribution, and exact stored source totals ranked by packets, bytes, or TCP SYN attempts
-- **Anomaly events**: rule, severity, and time filters plus a focused event inspector showing the explanation, observed value, configured threshold, sampled destinations, and the adjacent traffic windows
-- **Input & controls**: offline replay, live-session start/stop, and the active configuration
+- **Overview**: run status, processing totals, stored-window coverage, average and peak rates, a traffic timeline with detection markers, protocol shares, leading sources, significant events, and ranked key findings
+- **Traffic analytics**: packet or byte rate timelines, protocol distribution, retained source summaries, and per-window destination diversity
+- **Anomaly events**: search, rule, severity, and time filters plus a focused inspector with the observed measurement, configured threshold, explanation, destination evidence, adjacent traffic windows, and a conservative next investigation step
+- **Captures and history**: PCAP/PCAPNG upload and analysis, repository samples, authorized live capture, normalized run comparison, result export, and the active configuration
 
-Failed and partial runs are called out explicitly. Processing a capture from the dashboard refreshes the run list and selects the resulting run automatically.
+Key findings are generated deterministically from persisted measurements. They group repeated rule matches and may also describe a material traffic peak, dominant protocol, or concentrated tracked source. Descriptive observations are kept distinct from detection findings, and neither is presented as proof of an attack.
+
+Dashboard uploads are limited to 100 MiB, require a recognized PCAP or PCAPNG header, use a temporary file that is removed after processing, and persist only the uploaded filename rather than the server-side temporary path. Completed results are selected automatically. Duplicate captures use the existing replay fingerprint behavior.
+
+JSON exports contain run metadata, findings, windows, events, and retained source summaries. The CSV download is a ZIP containing a separate table for each dataset. Timestamps are UTC and rate units are per second. Local directory paths and capture payloads are not exported.
+
+Run comparison uses stored-window coverage to calculate average rates and events per minute, and compares protocol shares rather than raw protocol totals. Partial or failed runs are labelled as provisional.
 
 Set dashboard-specific path overrides before starting Streamlit:
 
@@ -233,7 +239,7 @@ These environment variables are read by `app.py`. For the CLI, use the global `-
 
 The dashboard has no built-in user authentication. Run it in a trusted environment, particularly because its controls can read server-local capture paths and start live monitoring.
 
-Event queries display at most 2,000 matching rows at once and report the complete filtered count. Narrow the rule, severity, or time filters to inspect later events. Configuration is cached by the Streamlit process; restart Streamlit after editing `config.json`.
+Event queries display at most 2,000 matching rows at once. Narrow the search, rule, severity, or time filters to inspect a smaller set. Configuration is cached by the Streamlit process; restart Streamlit after editing `config.json`.
 
 ## Configuration
 
@@ -306,11 +312,13 @@ Reset refuses to proceed without `--yes` and refuses non-Lattice SQLite files. R
 ```text
 .
 |-- app.py                     Streamlit dashboard
+|-- .streamlit/config.toml     Monochrome dashboard theme
 |-- config.json                Default runtime configuration
 |-- lattice/
 |   |-- capture.py             PCAP input and live capture
 |   |-- cli.py                 Command-line interface
 |   |-- config.py              Configuration models and validation
+|   |-- dashboard_analysis.py  Findings, uploads, comparison, and exports
 |   |-- dashboard_data.py      Dashboard data transformations
 |   |-- detector.py            Detection rules
 |   |-- features.py            Window aggregation and features
