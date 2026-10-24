@@ -16,7 +16,7 @@ from .storage import Storage, StorageError, reset_database
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lattice", description="Passive network traffic analysis "
-                                     "and anomaly detection (educational prototype).")
+                                     "and anomaly detection.")
     parser.add_argument("--config", help="path to config.json (default: project config.json)")
     parser.add_argument("--db", help="SQLite database path (overrides config database.path)")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")

@@ -11,7 +11,7 @@ from scapy.layers.inet import ICMP, IP, TCP, UDP  # noqa: E402
 from scapy.layers.inet6 import IPv6  # noqa: E402
 from scapy.layers.l2 import Ether  # noqa: E402
 from scapy.packet import Raw  # noqa: E402
-from scapy.utils import wrpcap  # noqa: E402
+from scapy.utils import PcapNgWriter, PcapWriter, wrpcap  # noqa: E402
 
 from lattice.config import Config, parse_config  # noqa: E402
 from lattice.models import PacketRecord, SourceStats, WindowStats  # noqa: E402
@@ -51,6 +51,24 @@ def ipv6_tcp_packet(ts: float, src: str = "2001:db8::1", dst: str = "2001:db8::2
 
 def write_pcap(path: Path, packets: Iterable[Any]) -> Path:
     wrpcap(str(path), list(packets))
+    return path
+
+
+def write_empty_pcap(path: Path) -> Path:
+    """Write a valid Ethernet PCAP containing no packet records."""
+    writer = PcapWriter(str(path), linktype=1, sync=True)
+    writer.close()
+    return path
+
+
+def write_pcapng(path: Path, packets: Iterable[Any]) -> Path:
+    """Write deterministic packets using Scapy's native PCAPNG writer."""
+    writer = PcapNgWriter(str(path))
+    try:
+        for packet in packets:
+            writer.write(packet)
+    finally:
+        writer.close()
     return path
 
 

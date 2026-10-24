@@ -106,3 +106,24 @@ def test_app_reports_invalid_configuration(tmp_path, monkeypatch):
     cfg.write_text('{"window": {"seconds": -1}}', encoding="utf-8")
     at = run_app(tmp_path / "x.db", cfg, tmp_path, monkeypatch)
     assert any("Configuration error" in e.value and "window.seconds" in e.value for e in at.error)
+
+
+def test_app_reports_corrupt_stored_window(tmp_path, monkeypatch):
+    db = tmp_path / "corrupt.db"
+    with Storage(db) as storage:
+        run = storage.start_run("pcap", "capture.pcap")
+        from lattice.models import WindowStats
+        window_id = storage.save_window(
+            run, WindowStats(0, 5, packets=1, bytes=60, packets_per_second=0.2,
+                             bytes_per_second=12, protocol_counts={"TCP": 1}),
+            [], 10, {"packets": 1, "bytes": 60, "windows": 1, "events": 0,
+                     "suppressed_events": 0, "skipped_packets": 0, "storage_errors": 0})
+        storage._conn.execute("UPDATE traffic_stats SET protocol_counts = ? WHERE id = ?",
+                              ("broken", window_id))
+        storage._conn.commit()
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps(make_config().to_dict()), encoding="utf-8")
+
+    at = run_app(db, cfg, tmp_path, monkeypatch)
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("Database error" in e.value and "invalid protocol counts" in e.value for e in at.error)

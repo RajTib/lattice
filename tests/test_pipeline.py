@@ -6,7 +6,7 @@ from lattice.cli import main
 from lattice.pipeline import process_pcap
 from lattice.storage import Storage, StorageError
 
-from factories import make_config, stamp, tcp_packet, udp_packet, write_pcap, eth
+from factories import make_config, stamp, tcp_packet, udp_packet, write_empty_pcap, write_pcap, write_pcapng, eth
 
 from scapy.layers.inet import IP, TCP
 from scapy.packet import Raw
@@ -122,6 +122,23 @@ def test_force_replaces_the_previous_run(tmp_path, storage):
     assert storage.get_run(first.run_id) is None and storage.query_events(first.run_id) == []
 
 
+def test_force_keeps_previous_completed_run_when_replacement_fails(tmp_path, storage, monkeypatch):
+    path = attack_pcap(tmp_path)
+    first = process_pcap(path, CONFIG, storage)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("replacement failed")
+
+    monkeypatch.setattr("lattice.pipeline.Pipeline.feed", fail)
+    with pytest.raises(RuntimeError, match="replacement failed"):
+        process_pcap(path, CONFIG, storage, force=True)
+
+    assert storage.get_run(first.run_id)["status"] == "completed"
+    assert len(storage.query_windows(first.run_id)) == 8
+    failed = next(r for r in storage.list_runs() if r["id"] != first.run_id)
+    assert failed["status"] == "failed" and "replacement failed" in failed["note"]
+
+
 def test_changed_settings_reprocess_the_same_file(tmp_path, storage):
     path = attack_pcap(tmp_path)
     process_pcap(path, CONFIG, storage)
@@ -131,6 +148,15 @@ def test_changed_settings_reprocess_the_same_file(tmp_path, storage):
     assert not second.duplicate and len(storage.list_runs()) == 2
 
 
+def test_processing_version_invalidates_cached_results(tmp_path, monkeypatch):
+    from lattice import pipeline as pipeline_module
+
+    path = attack_pcap(tmp_path)
+    first = pipeline_module.pcap_fingerprint(path, CONFIG)
+    monkeypatch.setattr(pipeline_module, "PROCESSING_VERSION", "next")
+    assert pipeline_module.pcap_fingerprint(path, CONFIG) != first
+
+
 def test_multiple_files_are_kept_as_separate_runs(tmp_path, storage):
     a = process_pcap(attack_pcap(tmp_path), CONFIG, storage)
     b = process_pcap(write_pcap(tmp_path / "clean.pcap", background(0, 20)), CONFIG, storage)
@@ -138,6 +164,23 @@ def test_multiple_files_are_kept_as_separate_runs(tmp_path, storage):
     assert storage.query_events(b.run_id) == []
     assert len(storage.query_events()) == 4                      # across all runs
     assert len(storage.query_windows(b.run_id)) == 4 and len(storage.query_windows(a.run_id)) == 8
+
+
+def test_empty_capture_completes_without_windows_or_events(tmp_path, storage):
+    summary = process_pcap(write_empty_pcap(tmp_path / "empty.pcap"), CONFIG, storage)
+    assert summary.status == "completed"
+    assert (summary.packets, summary.bytes, summary.windows, summary.events) == (0, 0, 0, 0)
+    assert storage.query_windows(summary.run_id) == []
+    assert storage.query_events(summary.run_id) == []
+
+
+def test_pcapng_runs_through_the_complete_pipeline(tmp_path, storage):
+    packets = background(0, 10)
+    path = write_pcapng(tmp_path / "input.pcapng", packets)
+    summary = process_pcap(path, CONFIG, storage)
+    assert summary.status == "completed" and summary.packets == len(packets)
+    assert summary.windows == 2 and summary.events == 0
+    assert sum(w["packets"] for w in storage.query_windows(summary.run_id)) == len(packets)
 
 
 def test_out_of_order_capture_is_replayed_in_timestamp_order(tmp_path, storage):
@@ -178,10 +221,48 @@ def test_storage_failure_does_not_stop_processing(tmp_path, storage, monkeypatch
 
     monkeypatch.setattr(storage, "save_window", flaky)
     summary = process_pcap(path, CONFIG, storage)
-    assert summary.status == "completed" and summary.storage_errors == 1
+    assert summary.status == "partial" and summary.storage_errors == 1
     assert summary.windows == 6 and summary.packets == 120   # processing saw every window
     assert len(storage.query_windows(summary.run_id)) == 5   # only the failed one is missing
     assert "could not be stored" in summary.note
+
+
+def test_read_error_marks_run_partial_and_is_not_reused(tmp_path, storage, monkeypatch):
+    path = write_pcap(tmp_path / "partial.pcap", background(0, 5))
+
+    def partial_records(_path, ingest):
+        ingest.seen = ingest.parsed = 1
+        ingest.read_error = "truncated packet record"
+        from lattice.models import PacketRecord
+        return [PacketRecord(0.0, 60, "TCP", "10.0.0.1", "10.0.0.2", 40000, 443, 0x10, 4)]
+
+    monkeypatch.setattr("lattice.pipeline.load_pcap_records", partial_records)
+    first = process_pcap(path, CONFIG, storage)
+    second = process_pcap(path, CONFIG, storage)
+    assert first.status == second.status == "partial"
+    assert not first.duplicate and not second.duplicate and first.run_id != second.run_id
+    assert "file ended early" in first.note
+
+
+def test_failed_run_totals_match_windows_committed_before_failure(tmp_path, storage, monkeypatch):
+    path = write_pcap(tmp_path / "failure.pcap", background(0, 20))
+    from lattice.pipeline import Pipeline
+    original_feed = Pipeline.feed
+
+    def fail_after_two_windows(self, record):
+        original_feed(self, record)
+        if record.timestamp >= 10:
+            raise RuntimeError("processing stopped")
+
+    monkeypatch.setattr(Pipeline, "feed", fail_after_two_windows)
+    with pytest.raises(RuntimeError, match="processing stopped"):
+        process_pcap(path, CONFIG, storage)
+
+    (run,) = storage.list_runs()
+    windows = storage.query_windows(run["id"])
+    assert run["status"] == "failed" and len(windows) == 2
+    assert run["windows"] == 2
+    assert run["packets"] == sum(window["packets"] for window in windows) == 40
 
 
 def test_identical_input_gives_identical_results(tmp_path):

@@ -20,6 +20,11 @@ from .storage import Storage, StorageError
 
 log = logging.getLogger(__name__)
 
+# Bump this whenever parsing, aggregation, or detection semantics change in a
+# way that should invalidate previously cached PCAP results. Configuration is
+# fingerprinted separately below.
+PROCESSING_VERSION = "1"
+
 
 class Pipeline:
     """Feeds records through aggregation and detection and persists each window."""
@@ -85,6 +90,7 @@ def pcap_fingerprint(path: str | Path, config: Config) -> str:
         raise CaptureError(f"PCAP file not found: {path}") from None
     except OSError as exc:
         raise CaptureError(f"cannot read {path}: {exc}") from exc
+    digest.update(f"lattice-processing-v{PROCESSING_VERSION}\0".encode("ascii"))
     digest.update(config.processing_fingerprint().encode("utf-8"))
     return digest.hexdigest()
 
@@ -112,21 +118,26 @@ def process_pcap(path: str | Path, config: Config, storage: Storage, *,
     if existing is not None and not force:
         return _summary_from_row(existing, duplicate=True)
 
+    # Keep known-good results until their replacement has completed. This is
+    # intentionally captured before starting the new run so cleanup cannot
+    # select the replacement itself.
+    replaced_run_ids = [] if not force else [
+        row["id"] for row in storage.list_runs()
+        if row["fingerprint"] == fingerprint and row["status"] == "completed"
+    ]
+
     started = time.perf_counter()
     ingest = IngestStats()
     records = load_pcap_records(file, ingest)  # raises CaptureError before any run row exists
 
-    while existing is not None:  # force: replace every earlier completed run of this input
-        storage.delete_run(existing["id"])
-        existing = storage.find_completed_run(fingerprint)
-
     run_id = storage.start_run("pcap", str(file.resolve()), fingerprint)
+    pipeline = Pipeline(config, storage, run_id, lambda: ingest)
     try:
-        pipeline = process_records(records, config, storage, run_id, ingest)
+        for record in records:
+            pipeline.feed(record)
+        pipeline.finish()
     except Exception as exc:
-        storage.finish_run(run_id, "failed", {"packets": 0, "bytes": 0, "windows": 0, "events": 0,
-                                              "suppressed_events": 0, "skipped_packets": ingest.skipped,
-                                              "storage_errors": 0}, note=f"{type(exc).__name__}: {exc}")
+        storage.finish_run(run_id, "failed", pipeline.totals(), note=f"{type(exc).__name__}: {exc}")
         raise
     notes = []
     if ingest.read_error:
@@ -134,11 +145,16 @@ def process_pcap(path: str | Path, config: Config, storage: Storage, *,
     if pipeline.storage_errors:
         notes.append(f"{pipeline.storage_errors} window(s) could not be stored")
     note = "; ".join(notes)
-    storage.finish_run(run_id, "completed", pipeline.totals(), note)
+    status = "partial" if ingest.read_error or pipeline.storage_errors else "completed"
+    storage.finish_run(run_id, status, pipeline.totals(), note)
+
+    if status == "completed":
+        for replaced_run_id in replaced_run_ids:
+            storage.delete_run(replaced_run_id)
 
     totals = pipeline.totals()
     return RunSummary(
-        run_id=run_id, source=str(file), mode="pcap", status="completed",
+        run_id=run_id, source=str(file), mode="pcap", status=status,
         packets=totals["packets"], bytes=totals["bytes"], skipped_packets=totals["skipped_packets"],
         windows=totals["windows"], events=totals["events"], suppressed_events=totals["suppressed_events"],
         storage_errors=totals["storage_errors"], elapsed_seconds=time.perf_counter() - started, note=note)

@@ -108,11 +108,24 @@ class LiveMonitor:
             self._error = str(exc)
             status, note = "failed", str(exc)
             log.error("live monitoring failed: %s", exc)
+        except Exception as exc:
+            # A live worker must never disappear without closing its run and
+            # exposing the failure to the caller/dashboard.
+            self._error = f"{type(exc).__name__}: {exc}"
+            status, note = "failed", self._error
+            log.exception("unexpected live monitoring failure")
         finally:
             capture.stop()
             if pipeline is not None:
-                self._drain(capture, pipeline)
-                pipeline.finish()
+                try:
+                    self._drain(capture, pipeline)
+                    pipeline.finish()
+                except Exception as exc:
+                    cleanup_error = f"{type(exc).__name__}: {exc}"
+                    self._error = self._error or cleanup_error
+                    status = "failed"
+                    note = f"{note}; finalization failed: {cleanup_error}" if note else cleanup_error
+                    log.exception("could not drain or finalize live pipeline")
             if storage is not None and self._run_id is not None:
                 try:
                     stats = capture.snapshot_stats()
@@ -134,6 +147,9 @@ class LiveMonitor:
             if capture.error:
                 self._error = capture.error
                 return "failed", f"capture stopped unexpectedly: {capture.error}"
+            if not capture.running and not self._stop.is_set():
+                self._error = "capture backend stopped unexpectedly"
+                return "failed", self._error
         return "stopped", ""
 
     @staticmethod

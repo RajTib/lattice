@@ -148,6 +148,11 @@ class Storage:
     def _check_ownership(conn: sqlite3.Connection) -> None:
         app_id = conn.execute("PRAGMA application_id").fetchone()[0]
         if app_id == APPLICATION_ID:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version != SCHEMA_VERSION:
+                conn.close()
+                raise StorageError(f"unsupported Lattice database schema version {version}; "
+                                   f"this build supports version {SCHEMA_VERSION}")
             return
         has_tables = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
@@ -281,14 +286,21 @@ class Storage:
         rows = self._query("SELECT * FROM traffic_stats WHERE run_id = ?" + clause +
                            " ORDER BY window_start", [run_id, *params])
         for row in rows:
-            row["protocol_counts"] = json.loads(row["protocol_counts"])
+            try:
+                counts = json.loads(row["protocol_counts"])
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise StorageError(f"invalid protocol counts in traffic window {row['id']}: {exc}") from exc
+            if not isinstance(counts, dict) or not all(
+                    isinstance(protocol, str) and isinstance(count, int) and count >= 0
+                    for protocol, count in counts.items()):
+                raise StorageError(f"invalid protocol counts in traffic window {row['id']}")
+            row["protocol_counts"] = counts
         return rows
 
-    def query_events(self, run_id: Optional[int] = None, start: Optional[float] = None,
-                     end: Optional[float] = None, rules: Optional[Sequence[str]] = None,
-                     severities: Optional[Sequence[str]] = None,
-                     limit: int = 1000) -> list[dict[str, Any]]:
-        """Events filtered by run, time range (``start <= ts <= end``), rule and severity."""
+    @staticmethod
+    def _event_filter(run_id: Optional[int], start: Optional[float], end: Optional[float],
+                      rules: Optional[Sequence[str]], severities: Optional[Sequence[str]]) \
+            -> tuple[list[str], list[Any]]:
         clauses, params = ["1 = 1"], []
         if run_id is not None:
             clauses.append("run_id = ?")
@@ -302,15 +314,29 @@ class Storage:
         for column, values in (("rule", rules), ("severity", severities)):
             if values is not None:
                 if not values:
-                    return []  # an empty selection matches nothing
+                    clauses.append("0 = 1")  # an empty selection matches nothing
+                    continue
                 clauses.append(f"{column} IN ({', '.join('?' * len(values))})")
                 params.extend(values)
+        return clauses, params
+
+    def query_events(self, run_id: Optional[int] = None, start: Optional[float] = None,
+                     end: Optional[float] = None, rules: Optional[Sequence[str]] = None,
+                     severities: Optional[Sequence[str]] = None,
+                     limit: int = 1000) -> list[dict[str, Any]]:
+        """Events filtered by run, time range (``start <= ts <= end``), rule and severity."""
+        clauses, params = self._event_filter(run_id, start, end, rules, severities)
         params.append(int(limit))
         return self._query("SELECT * FROM events WHERE " + " AND ".join(clauses) +
                            " ORDER BY ts, id LIMIT ?", params)
 
-    def count_events(self, run_id: int) -> int:
-        return int(self._query("SELECT COUNT(*) AS n FROM events WHERE run_id = ?", (run_id,))[0]["n"])
+    def count_events(self, run_id: Optional[int] = None, start: Optional[float] = None,
+                     end: Optional[float] = None, rules: Optional[Sequence[str]] = None,
+                     severities: Optional[Sequence[str]] = None) -> int:
+        """Count events using the same filters as :meth:`query_events`."""
+        clauses, params = self._event_filter(run_id, start, end, rules, severities)
+        return int(self._query("SELECT COUNT(*) AS n FROM events WHERE " + " AND ".join(clauses),
+                               params)[0]["n"])
 
     def top_sources(self, run_id: int, start: Optional[float] = None, end: Optional[float] = None,
                     by: str = "packets", limit: int = 10) -> list[dict[str, Any]]:

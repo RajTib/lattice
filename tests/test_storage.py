@@ -4,7 +4,7 @@ import sqlite3
 import pytest
 
 from lattice.models import Event, Severity, WindowStats
-from lattice.storage import APPLICATION_ID, Storage, StorageError, reset_database
+from lattice.storage import APPLICATION_ID, SCHEMA_VERSION, Storage, StorageError, reset_database
 
 from factories import source, window
 
@@ -44,6 +44,18 @@ def test_reopening_existing_database_is_safe(tmp_path):
         assert len(db.list_runs()) == 1 and db.count_events(run) == 1
 
 
+def test_file_database_uses_wal_and_allows_concurrent_reads(tmp_path):
+    path = tmp_path / "x.db"
+    with Storage(path) as writer:
+        assert writer._conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        run = writer.start_run("pcap", "a.pcap")
+        writer.save_window(run, stats_window(0), [], 10, TOTALS)
+        with Storage(path, read_only=True) as reader:
+            assert len(reader.query_windows(run)) == 1
+            writer.save_window(run, stats_window(5), [], 10, TOTALS)
+            assert len(reader.query_windows(run)) == 2
+
+
 def test_window_roundtrip_with_top_talkers(storage):
     run = storage.start_run("pcap", "a.pcap")
     storage.save_window(run, stats_window(0.0), [], top_n=1, totals=TOTALS)
@@ -80,6 +92,9 @@ def test_event_roundtrip_and_filters(storage):
                                                   severities=["WARNING"])] == [30]
     assert storage.query_events(run, rules=[]) == []
     assert len(storage.query_events(run, limit=2)) == 2
+    assert storage.count_events(run, start=15, end=30) == 2
+    assert storage.count_events(run, rules=["possible_port_scan"], severities=["WARNING"]) == 1
+    assert storage.count_events(run, rules=[]) == 0
 
 
 def test_event_filters_are_parameterized(storage):
@@ -118,6 +133,16 @@ def test_protocol_totals_and_bounds(storage):
         storage.save_window(run, stats_window(start), [], 10, TOTALS)
     assert storage.protocol_totals(run) == {"TCP": 14, "UDP": 6}
     assert storage.time_bounds(run) == (0.0, 10.0)
+
+
+def test_corrupt_protocol_counts_are_reported_as_storage_error(storage):
+    run = storage.start_run("pcap", "a")
+    window_id = storage.save_window(run, stats_window(), [], 10, TOTALS)
+    storage._conn.execute("UPDATE traffic_stats SET protocol_counts = ? WHERE id = ?",
+                          ("not-json", window_id))
+    storage._conn.commit()
+    with pytest.raises(StorageError, match="invalid protocol counts"):
+        storage.query_windows(run)
 
 
 def test_save_window_updates_run_progress(storage):
@@ -194,6 +219,18 @@ def test_foreign_sqlite_database_is_refused(tmp_path):
     conn = sqlite3.connect(path)  # untouched
     assert conn.execute("SELECT name FROM sqlite_master").fetchall() == [("notes",)]
     conn.close()
+
+
+def test_unsupported_lattice_schema_version_is_refused(tmp_path):
+    path = tmp_path / "future.db"
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA application_id = {APPLICATION_ID}")
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    conn.close()
+    with pytest.raises(StorageError, match="unsupported Lattice database schema version"):
+        Storage(path)
+    with pytest.raises(StorageError, match="unsupported Lattice database schema version"):
+        Storage(path, read_only=True)
 
 
 def test_reset_requires_confirmation_and_clears_lattice_data(tmp_path):

@@ -7,6 +7,7 @@ values are rejected with a message naming the offending key, so a typo such as
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -191,6 +192,8 @@ class _Section:
             raise ConfigError(f"{name}: must not be null")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ConfigError(f"{name}: expected a number, got {value!r}")
+        if not math.isfinite(float(value)):
+            raise ConfigError(f"{name}: expected a finite number, got {value!r}")
         if integer and (isinstance(value, float) and not value.is_integer()):
             raise ConfigError(f"{name}: expected a whole number, got {value!r}")
         too_small = value <= minimum if exclusive_min else value < minimum

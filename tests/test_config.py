@@ -71,6 +71,12 @@ def test_invalid_config_names_the_problem(data, message):
         parse_config(data)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_numbers_are_rejected(value):
+    with pytest.raises(ConfigError, match="window.seconds.*finite"):
+        parse_config({"window": {"seconds": value}})
+
+
 def test_null_thresholds_are_allowed_when_another_remains():
     cfg = parse_config({"detection": {"traffic_spike": {"pps_threshold": None, "bps_threshold": None}},
                         "capture": {"interface": ""}})

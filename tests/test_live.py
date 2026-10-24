@@ -1,4 +1,5 @@
 """Live capture lifecycle, tested with a fake sniffer (no privileges, no network)."""
+import os
 import threading
 import time
 
@@ -48,6 +49,15 @@ class FakeSniffer:
 class FailingSniffer(FakeSniffer):
     def _run(self):
         self.exception = PermissionError("Operation not permitted")
+
+
+class EarlyExitSniffer(FakeSniffer):
+    """Starts successfully, then exits without reporting an exception."""
+
+    def _run(self):
+        self.running = True
+        time.sleep(0.35)
+        self.running = False
 
 
 @pytest.fixture(autouse=True)
@@ -118,6 +128,8 @@ def test_double_start_is_rejected():
     cap.stop()
 
 
+@pytest.mark.skipif(os.environ.get("LATTICE_TEST_REAL_CAPTURE") != "1",
+                    reason="set LATTICE_TEST_REAL_CAPTURE=1 to exercise the host capture backend")
 def test_real_sniffer_with_bad_interface_fails_cleanly():
     """Uses Scapy's real AsyncSniffer: must raise CaptureError, never hang or leak threads."""
     before = threading.active_count()
@@ -198,8 +210,26 @@ def test_monitor_start_failure_creates_no_run_and_leaves_no_threads(tmp_path):
     assert wait_for(lambda: not monitor.running)
     assert not alive("fake-sniffer")
     assert "PermissionError" in monitor.state().error
-    import os
     assert not os.path.exists(db) or Storage(db, read_only=True).list_runs() == []
+
+
+def test_monitor_records_unexpected_worker_failure(tmp_path, monkeypatch):
+    db = str(tmp_path / "x.db")
+    monitor = LiveMonitor(monitor_config(), db, sniffer_factory=FakeSniffer)
+
+    def fail_tick(self, now):
+        raise RuntimeError("unexpected pipeline failure")
+
+    monkeypatch.setattr("lattice.live.Pipeline.tick", fail_tick)
+    with pytest.raises(CaptureError, match="unexpected pipeline failure"):
+        monitor.start("fake0")
+
+    assert wait_for(lambda: not monitor.running)
+    assert not alive("lattice-live") and not alive("fake-sniffer")
+    with Storage(db, read_only=True) as storage:
+        (run,) = storage.list_runs()
+    assert run["status"] == "failed"
+    assert "unexpected pipeline failure" in run["note"]
 
 
 def test_monitor_marks_run_failed_if_capture_dies_midway(tmp_path):
@@ -212,3 +242,16 @@ def test_monitor_marks_run_failed_if_capture_dies_midway(tmp_path):
         run = s.get_run(run_id)
     assert run["status"] == "failed" and "interface went away" in run["note"]
     assert "interface went away" in monitor.state().error
+
+
+def test_monitor_marks_run_failed_if_capture_backend_exits_cleanly(tmp_path):
+    db = str(tmp_path / "x.db")
+    monitor = LiveMonitor(monitor_config(), db, sniffer_factory=EarlyExitSniffer)
+    run_id = monitor.start("fake0")
+
+    assert wait_for(lambda: not monitor.running, 8.0)
+    with Storage(db, read_only=True) as storage:
+        run = storage.get_run(run_id)
+    assert run["status"] == "failed"
+    assert "capture backend stopped unexpectedly" in run["note"]
+    assert monitor.state().error == "capture backend stopped unexpectedly"

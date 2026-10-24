@@ -114,6 +114,11 @@ def render_overview(db_path: str, run_id: int, live: bool) -> None:
         right.metric("Bytes / s", dd.human_bytes(last["bytes_per_second"]) + "/s")
         top = sorted(last["protocol_counts"].items(), key=lambda kv: -kv[1])[:5]
         st.caption("Protocols in this window: " + (", ".join(f"{p} ×{n}" for p, n in top) or "none"))
+        if last["untracked_packets"]:
+            st.warning(f"{last['untracked_packets']:,} packet(s) in this window came from sources beyond "
+                       "the configured source-tracking limit. Per-source rules may be incomplete.")
+        if last["late_packets"]:
+            st.caption(f"Late packets folded into this window: {last['late_packets']:,}")
         started = dd.format_time(run["started_at"])
         st.caption(f"Run started {started} (processing time) · source: {run['source']}")
 
@@ -175,13 +180,21 @@ def render_events(db_path: str, run_id: int, live: bool) -> None:
                                format="HH:mm:ss")
             start, end = chosen[0].timestamp(), chosen[1].timestamp()
 
-        events = read_db(db_path, lambda s: s.query_events(run_id, start, end, rules, severities, limit=2000))
+        total_events = read_db(
+            db_path, lambda s: s.count_events(run_id, start, end, rules, severities)) or 0
+        events = read_db(
+            db_path, lambda s: s.query_events(run_id, start, end, rules, severities, limit=2000))
         if not events:
             st.info("No events match the current filters." if bounds is not None
                     else "No events: nothing has been stored for this run yet.")
             return
         frame = dd.events_frame(events)
-        st.write(f"**{len(frame)}** event(s)")
+        if total_events > len(frame):
+            st.write(f"Showing **{len(frame):,}** of **{total_events:,}** matching events")
+            st.caption("The event table is limited to the first 2,000 matches. Narrow the filters "
+                       "or time range to inspect later events.")
+        else:
+            st.write(f"**{len(frame):,}** event(s)")
         st.dataframe(
             frame, hide_index=True, use_container_width=True,
             column_config={
@@ -197,7 +210,7 @@ def render_events(db_path: str, run_id: int, live: bool) -> None:
             chart = frame.head(40).reset_index(drop=True)
             chart.index = [f"{n + 1}. {r.rule.split('_')[0]} {r.source}" for n, r in enumerate(chart.itertuples())]
             st.bar_chart(chart[["observed", "threshold"]], height=260)
-            st.caption("Showing the first 40 matching events; the table above lists them all.")
+            st.caption("Showing the first 40 events from the filtered table.")
 
     body()
 
@@ -263,7 +276,7 @@ def render_controls(db_path: str, config: Config, config_path: Optional[str]) ->
         st.caption("Lattice only observes traffic; it never blocks or modifies it.")
 
     st.divider()
-    with st.expander("Configuration (read-only; edit config.json and reload)"):
+    with st.expander("Configuration (read-only; edit config.json and restart Streamlit)"):
         st.caption(f"Database: `{db_path}`  ·  Config: `{config_path or 'config.json'}`")
         st.json(config.to_dict())
 

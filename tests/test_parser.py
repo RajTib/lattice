@@ -9,7 +9,8 @@ from lattice.capture import CaptureError, iter_pcap_records, load_pcap_records
 from lattice.models import IngestStats
 from lattice.parser import PacketParseError, parse_packet
 
-from factories import (eth, icmp_packet, ipv6_tcp_packet, stamp, tcp_packet, udp_packet, write_pcap)
+from factories import (eth, icmp_packet, ipv6_tcp_packet, stamp, tcp_packet, udp_packet, write_pcap,
+                       write_pcapng)
 
 
 def test_tcp_ipv4_fields():
@@ -132,6 +133,19 @@ def test_pcap_roundtrip_and_counts(tmp_path):
     records = load_pcap_records(path, stats)
     assert [r.protocol for r in records] == ["TCP", "UDP", "ICMP"]
     assert (stats.seen, stats.parsed, stats.malformed, stats.skipped) == (3, 3, 0, 0)
+
+
+def test_pcapng_roundtrip_preserves_order_fields_and_timestamps(tmp_path):
+    path = write_pcapng(tmp_path / "a.pcapng", [
+        tcp_packet(10.125001, sport=50001, dport=443),
+        udp_packet(10.875999, sport=50002, dport=53),
+    ])
+    stats = IngestStats()
+    records = load_pcap_records(path, stats)
+    assert [r.protocol for r in records] == ["TCP", "UDP"]
+    assert [r.src_port for r in records] == [50001, 50002]
+    assert [r.timestamp for r in records] == pytest.approx([10.125001, 10.875999], abs=1e-6)
+    assert (stats.seen, stats.parsed, stats.skipped) == (2, 2, 0)
 
 
 def test_pcap_records_sorted_by_timestamp_with_stable_ties(tmp_path):
