@@ -113,7 +113,8 @@ def event_context_frame(rows: Sequence[dict[str, Any]], event_start: float) -> p
 
 
 def sources_frame(rows: Sequence[dict[str, Any]]) -> pd.DataFrame:
-    return pd.DataFrame(rows, columns=["src_ip", "packets", "bytes", "syn_attempts"])
+    return pd.DataFrame(rows, columns=["src_ip", "packets", "bytes", "syn_attempts",
+                                       "max_distinct_ports", "max_distinct_hosts"])
 
 
 def protocol_series(counts: dict[str, int]) -> pd.Series:

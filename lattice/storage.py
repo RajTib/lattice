@@ -347,7 +347,8 @@ class Storage:
         clause, params = self._time_clause(start, end, "t.window_start", "t.window_end")
         return self._query(
             "SELECT s.src_ip AS src_ip, SUM(s.packets) AS packets, SUM(s.bytes) AS bytes, "
-            "SUM(s.syn_attempts) AS syn_attempts FROM source_stats s "
+            "SUM(s.syn_attempts) AS syn_attempts, MAX(s.distinct_ports) AS max_distinct_ports, "
+            "MAX(s.distinct_hosts) AS max_distinct_hosts FROM source_stats s "
             "JOIN traffic_stats t ON t.id = s.window_id WHERE t.run_id = ?" + clause +
             f" GROUP BY s.src_ip ORDER BY {column} DESC, s.src_ip LIMIT ?",
             [run_id, *params, int(limit)])

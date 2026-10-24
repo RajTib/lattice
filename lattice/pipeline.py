@@ -105,12 +105,13 @@ def process_records(records: Iterable[PacketRecord], config: Config, storage: St
 
 
 def process_pcap(path: str | Path, config: Config, storage: Storage, *,
-                 force: bool = False) -> RunSummary:
+                 force: bool = False, source_label: Optional[str] = None) -> RunSummary:
     """Replay one PCAP through the full pipeline and store the results.
 
     A file already processed with identical settings is not processed again
     (``summary.duplicate`` is True) unless ``force`` is set, in which case the
-    earlier run is replaced.
+    earlier run is replaced. ``source_label`` changes only the persisted display
+    name; fingerprinting and packet reading always use ``path``.
     """
     file = Path(path)
     fingerprint = pcap_fingerprint(file, config)
@@ -130,7 +131,8 @@ def process_pcap(path: str | Path, config: Config, storage: Storage, *,
     ingest = IngestStats()
     records = load_pcap_records(file, ingest)  # raises CaptureError before any run row exists
 
-    run_id = storage.start_run("pcap", str(file.resolve()), fingerprint)
+    source = source_label or str(file.resolve())
+    run_id = storage.start_run("pcap", source, fingerprint)
     pipeline = Pipeline(config, storage, run_id, lambda: ingest)
     try:
         for record in records:
@@ -154,7 +156,7 @@ def process_pcap(path: str | Path, config: Config, storage: Storage, *,
 
     totals = pipeline.totals()
     return RunSummary(
-        run_id=run_id, source=str(file), mode="pcap", status=status,
+        run_id=run_id, source=source, mode="pcap", status=status,
         packets=totals["packets"], bytes=totals["bytes"], skipped_packets=totals["skipped_packets"],
         windows=totals["windows"], events=totals["events"], suppressed_events=totals["suppressed_events"],
         storage_errors=totals["storage_errors"], elapsed_seconds=time.perf_counter() - started, note=note)
