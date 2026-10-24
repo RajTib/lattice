@@ -1,165 +1,380 @@
 # Lattice
 
-A small, **passive** network traffic analysis and anomaly detection tool for small networks and offline PCAP files. It captures or replays packets, extracts header-level features, aggregates them into fixed time windows, applies four configurable rules, stores everything in SQLite and shows it in a Streamlit dashboard.
+Lattice is a passive network traffic analysis and anomaly detection tool for offline packet captures and small-network monitoring. It extracts packet-header fields, summarizes traffic in fixed time windows, evaluates configurable detection rules, stores the results in SQLite, and presents them in a Streamlit dashboard.
 
-Lattice is an educational prototype (Computer Networks course project). It **monitors only**: it never blocks, modifies or injects traffic, and it stores headers, not payloads. Events are *indicators of potentially unusual behaviour, not proof of an attack*.
+Lattice does not block, modify, or inject traffic. Its events indicate traffic that crossed a configured threshold; they do not prove that an attack occurred.
+
+## Capabilities
+
+- Replay PCAP and PCAPNG files through a deterministic analysis pipeline.
+- Capture live traffic from a selected interface through Scapy.
+- Parse IPv4, IPv6, TCP, UDP, ICMP, ICMPv6, ARP, unknown IP protocols, and unsupported Ethernet types.
+- Calculate packet and byte rates, protocol distributions, per-source traffic totals, TCP SYN counts, and distinct destination counts.
+- Detect traffic-rate spikes, excessive TCP connection attempts, possible port scans or host sweeps, and traffic outside protocol or port allowlists.
+- Persist runs, window statistics, selected source summaries, and anomaly events in SQLite.
+- Explore stored traffic and events through a Streamlit dashboard.
+- Generate deterministic synthetic captures and compare detected events with known scenarios.
+
+Packet payloads are not retained by the analysis pipeline. Stored data still includes potentially sensitive metadata such as IP addresses, timestamps, event details, and input file paths.
 
 ## Architecture
 
+Offline replay and live capture share the same parser, aggregation, detection, and persistence components. Offline records are sorted by packet timestamp before processing. Live records pass through a bounded queue and use the system clock to close idle windows.
+
+```mermaid
+flowchart LR
+    CFG["config.json"]
+
+    subgraph Inputs
+        PCAP["PCAP / PCAPNG file"] --> READER["PcapReader"]
+        NIC["Network interface"] --> SNIFFER["Scapy AsyncSniffer"]
+    end
+
+    READER --> OFFLINE["Packet parser and stable timestamp sort"]
+    SNIFFER --> LIVE["Packet parser and bounded live queue"]
+
+    OFFLINE --> AGG["Feature extraction and fixed-window aggregation"]
+    LIVE --> AGG
+    AGG --> DETECTOR["Rule-based anomaly detection"]
+    AGG --> PIPELINE["Pipeline persistence step"]
+    DETECTOR --> PIPELINE
+    PIPELINE --> DB[(SQLite)]
+
+    DB --> DASH["Streamlit dashboard"]
+    DASH -. "starts replay" .-> READER
+    DASH -. "starts live session" .-> SNIFFER
+
+    CFG -. "capture settings" .-> SNIFFER
+    CFG -. "window and allowlist settings" .-> AGG
+    CFG -. "thresholds, severity, cooldown" .-> DETECTOR
+    CFG -. "database path" .-> DB
+    CFG -. "dashboard controls" .-> DASH
 ```
-Traffic input ─► Capture & parsing ─► Feature extraction ─► Rule-based detection ─► SQLite ─► Streamlit
- (PCAP / live)   capture.py          features.py            detector.py            storage.py   app.py
-                 parser.py
-```
 
-| Module | Responsibility |
-|---|---|
-| `lattice/parser.py` | Scapy packet → normalized `PacketRecord` (timestamp, length, protocol, IPs, ports, TCP flags). Downstream code never sees Scapy objects. |
-| `lattice/capture.py` | PCAP/PCAPNG reading (sorted, malformed packets counted) and `LiveCapture` (background sniffer, bounded queue, clean stop). |
-| `lattice/features.py` | `Aggregator`: fixed windows, rates, protocol mix, per-source SYN/port/host counts, bounded state. |
-| `lattice/detector.py` | `Detector`: four rules, severity, cooldown. No I/O. |
-| `lattice/storage.py` | SQLite schema, atomic per-window writes, filtered queries, safe reset. |
-| `lattice/pipeline.py` | Wires the stages together; PCAP processing with duplicate detection. |
-| `lattice/live.py` | `LiveMonitor`: worker thread that owns sniffer, DB connection and pipeline for a live session. |
-| `lattice/config.py` | `config.json` loading and strict validation; protocol/port allowlist. |
-| `lattice/dashboard_data.py` | Pure functions shaping stored rows for display. |
-| `app.py` | Streamlit dashboard (reads the database). |
-| `lattice/cli.py` | `python -m lattice …` command line. |
-| `scripts/` | Synthetic traffic generator and evaluation runner. |
+The main implementation boundaries are:
 
-### Definitions used throughout
+- `lattice/capture.py`: offline capture reading, interface discovery, and live sniffing
+- `lattice/parser.py`: Scapy packet normalization
+- `lattice/features.py`: fixed-window aggregation and feature extraction
+- `lattice/detector.py`: detection rules, severity, and alert cooldown
+- `lattice/storage.py`: SQLite schema, transactions, and queries
+- `lattice/pipeline.py`: shared offline/live processing pipeline
+- `lattice/live.py`: live-session worker and lifecycle management
+- `lattice/dashboard_data.py`: display-oriented data transformations
+- `app.py`: Streamlit interface and controls
 
-* **Packet**: one captured frame that parsed successfully.
-* **Connection attempt**: a TCP packet with SYN set and ACK clear. Lattice does no session tracking, so a retransmitted or duplicate SYN counts as another attempt, and it **never claims a connection was established**.
-* **Window**: `[start, end)`, aligned to multiples of `window.seconds` on the *packet-timestamp* axis (offline replay never reads the machine clock). Rates divide by the full window length, so a partly filled final window reads low. Gaps become empty windows (zero rates) up to `window.max_gap_windows`; longer gaps are skipped and the detector's baseline is reset. A packet older than the open window (live reordering) is folded into the open window and counted as late.
-* Per-source port/host counts (Rules B and C) use **SYN-without-ACK packets only**. Counting all packets would make a server replying to many clients look like a scanner.
-* Unsupported protocols are *kept*: they appear as `IP_PROTO_<n>` or `ETHERTYPE_0x….` Only structurally invalid packets (e.g. IPv4 IHL < 5) are skipped, and they are counted in the "skipped packets" statistic.
+## Requirements
 
-## Prerequisites
+- Python 3.10 or newer
+- Offline analysis: no administrator privileges required
+- Live capture:
+  - Windows: [Npcap](https://npcap.com/) and an Administrator terminal
+  - Linux: root or suitable `CAP_NET_RAW`/`CAP_NET_ADMIN` capabilities
+  - macOS: permission to access `/dev/bpf*`
 
-* Python 3.10+ (developed on 3.14)
-* Offline analysis, tests and the dashboard need **no** administrator rights and no network access.
-* Live capture only: privileges and (on Windows) Npcap. See [Live capture](#live-capture).
-
-## Installation
+Install the Python dependencies in a virtual environment:
 
 ```bash
 python -m venv .venv
-# Windows:  .venv\Scripts\activate        Linux/macOS:  source .venv/bin/activate
-pip install -r requirements.txt
+```
+
+Activate it on Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+Or on Linux and macOS:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
 ## Quick start
 
-```bash
-python -m scripts.traffic_gen --out samples        # generate the synthetic sample PCAPs (seeded, reproducible)
-python -m lattice --db lattice.db replay samples/*.pcap   # on Windows PowerShell expand with: (Get-ChildItem samples\*.pcap).FullName
-streamlit run app.py                               # opens the dashboard; select a run in the sidebar
+Process the included captures into a new database.
+
+Windows PowerShell:
+
+```powershell
+python -m lattice --db lattice.db replay (Get-ChildItem .\samples\*.pcap).FullName
 ```
 
-Dashboard tabs: **Overview** (mode, status, totals, latest window, skipped packets), **Traffic analytics** (packets/s, bytes/s, protocol distribution, top sources), **Anomaly events** (filters by rule, severity and time; observed vs. threshold; explanations) and **Input & controls** (PCAP processing, live start/stop, configuration). A banner always states whether the data shown is *historical* or *live*. The dashboard reads persisted data; reruns never reprocess a PCAP.
-
-Set `LATTICE_DB` / `LATTICE_CONFIG` to override the database path or config file.
-
-## Replaying a PCAP
+Linux and macOS:
 
 ```bash
-python -m lattice replay capture.pcap [more.pcapng …] [--config config.json] [--db lattice.db] [--force]
+python -m lattice --db lattice.db replay samples/*.pcap
 ```
 
-A file already processed with identical settings (content hash + window/detection config) is reported as already processed and not stored twice; `--force` replaces the earlier run. Packets are replayed in timestamp order (stable for ties), so results are deterministic.
+Start the dashboard:
+
+```bash
+streamlit run app.py
+```
+
+Select a stored run in the sidebar. The dashboard reads persisted results and does not reprocess a capture when a historical run is selected.
+
+## Offline capture analysis
+
+Use the `replay` command with one or more files:
+
+```bash
+python -m lattice --config config.json --db lattice.db replay capture.pcap another-capture.pcapng
+```
+
+Global options such as `--config` and `--db` must appear before the `replay` subcommand. The `--force` option belongs after it:
+
+```bash
+python -m lattice --db lattice.db replay capture.pcap --force
+```
+
+Before replay, Lattice hashes the capture contents together with the window and detection configuration. A completed run with the same fingerprint is reused unless `--force` is supplied. Forced replay replaces earlier completed runs with the same fingerprint.
+
+Records are sorted by packet timestamp using a stable sort, making results deterministic for a given capture, configuration, and implementation version. The full set of normalized packet records is held in memory during sorting, so large captures require proportionally more memory.
+
+The dashboard can also process a server-local capture path from **Input & controls**. Its sample selector lists captures in `samples/`.
 
 ## Live capture
 
-> Only capture on interfaces and networks you are **authorized** to monitor.
+Only capture traffic on interfaces and networks you are authorized to monitor.
+
+Inspect available interfaces and the environment readiness message:
 
 ```bash
-python -m lattice interfaces                       # lists interfaces and whether capture looks possible
-python -m lattice live --interface "Ethernet" --filter "tcp or udp" [--duration 300]
+python -m lattice interfaces
 ```
 
-Or use the dashboard's *Input & controls* tab (requires ticking an authorization box). Stop with Ctrl+C or the Stop button; stopping joins the sniffer thread, drains the queue, flushes the last window and closes the run record.
+Start a live session:
 
-| OS | Requirement |
-|---|---|
-| Windows | Install [Npcap](https://npcap.com) and run from an **Administrator** terminal. Without Npcap, Scapy cannot sniff and Lattice reports this instead of starting. |
-| Linux | Root, or `sudo setcap cap_net_raw,cap_net_admin+eip $(readlink -f $(which python))`. |
-| macOS | Access to `/dev/bpf*` (usually root). |
+```bash
+python -m lattice --db lattice.db live --interface "Ethernet" --filter "tcp or udp" --duration 300
+```
 
-**Verification status:** live capture is covered by tests using a fake sniffer (lifecycle, queue overflow, error paths, no leaked threads) and by a test that the real Scapy sniffer fails cleanly on a nonexistent interface. It has **not** been exercised against a real network, because the development machine had no Npcap. Treat real-traffic behaviour as unverified.
+Omit `--duration` to run until Ctrl+C. Interface names are platform-specific; copy the name reported by the `interfaces` command.
 
-## Configuration reference (`config.json`)
+Live capture places parsed records into a bounded queue. If the queue is full, new records are dropped and counted rather than blocking the sniffer. Stopping a session signals the worker, stops the sniffer, drains queued records, flushes the last populated window, and closes the run record.
 
-Unknown keys, wrong types and out-of-range values are rejected with the offending key named. Missing keys use the defaults shown. Every rule fires when the observed value is **strictly greater** than its threshold.
+The live-capture lifecycle is tested with a threaded fake sniffer, including queue overflow and failure handling. Real-interface capture depends on the host OS, capture driver, permissions, and interface configuration and should be validated in the intended deployment environment.
 
-| Key | Default | Meaning |
+## Detection rules
+
+Every rule fires only when the observed value is strictly greater than its threshold.
+
+| Rule | Default condition | Interpretation |
 |---|---|---|
-| `database.path` | `lattice.db` | SQLite file (`--db` overrides). |
-| `capture.interface` / `bpf_filter` | `null` | Default interface and BPF filter for live mode. |
-| `capture.queue_size` | 20000 | Live packet queue; overflow is dropped and counted. |
-| `window.seconds` | 5 | Window length. |
-| `window.max_gap_windows` | 12 | Gaps up to this many windows are filled with empty windows. |
-| `window.top_talkers` | 10 | Sources stored per window. |
-| `window.max_sources_per_window` | 5000 | Memory bound; extra sources are counted, not tracked. |
-| `detection.cooldown_seconds` | 30 | Same (rule, source, metric) is suppressed this long unless severity escalates. `0` disables. |
-| `detection.severity.warning_ratio` / `high_ratio` | 2.0 / 5.0 | Severity from `observed ÷ threshold`: **INFO** below `warning_ratio`, **WARNING** from it, **HIGH** from `high_ratio`. |
-| `traffic_spike.pps_threshold` / `bps_threshold` | 1000 / 1 000 000 | Absolute packets/s and bytes/s limits (`null` disables). |
-| `traffic_spike.moving_average_multiplier` | 4.0 | Fire when a rate exceeds this multiple of the recent average (`null` disables). |
-| `traffic_spike.baseline_windows` | 6 | Windows in the moving average. |
-| `traffic_spike.min_baseline_windows` | 3 | No relative comparison until this much history exists. |
-| `traffic_spike.min_baseline_pps` / `min_baseline_bps` | 1.0 / 100 | Averages below this are ignored (no comparisons against ~zero). |
-| `connection_attempts.max_syn_per_source` | 100 | SYN-without-ACK packets per source per window (Rule B). |
-| `port_scan.max_distinct_ports` | 20 | Distinct destination ports probed per source per window (Rule C). |
-| `port_scan.max_distinct_hosts` | 20 | Distinct destination hosts probed (`null` disables). |
-| `unexpected_traffic.max_packets` | 10 | Packets outside the allowlists per window (Rule D). |
-| `unexpected_traffic.allowed_protocols` | TCP, UDP, ICMP, ICMPv6, ARP | Anything else (e.g. `IP_PROTO_47`) counts as unexpected. |
-| `unexpected_traffic.allowed_ports` | 22, 53, 80, 123, 443 | Ints or ranges like `"8000-8100"`. A TCP/UDP packet conforms if **either** endpoint port is allowed (replies carry the service port as source). |
+| Traffic spike | Packet rate above 1,000 packets/s, byte rate above 1,000,000 bytes/s, or either rate above 4 times its recent moving average | A window-wide increase in traffic volume. Packet-rate and byte-rate conditions produce separate events. |
+| Excessive connection attempts | More than 100 TCP SYN-without-ACK packets from one source in a window | Repeated TCP connection attempts; not a count of established connections. Retransmitted SYN packets count again. |
+| Possible port scan or host sweep | More than 20 distinct destination ports or 20 distinct destination hosts reached by SYN-without-ACK packets from one source | Possible TCP SYN scanning. Port and host conditions produce separate events. |
+| Unexpected protocol or port | More than 10 packets in a window fall outside the configured allowlists | Traffic that does not match the local protocol or service-port policy. |
 
-Each rule also has `"enabled": true|false`. **Tune the allowlist and thresholds to your network**; the defaults are only reasonable for a small office-like environment.
+Traffic-spike baselines retain the most recent six windows and require at least three. Near-zero baselines are ignored. A long skipped gap resets the baseline; shorter gaps are represented by empty windows and remain part of the history.
 
-Rules: `traffic_spike`, `excessive_connection_attempts`, `possible_port_scan`, `unexpected_protocol_or_port`. A port scan to ports outside the allowlist legitimately raises both Rule C and Rule D.
+Severity is derived from `observed / threshold`:
+
+- `INFO`: below the configured warning ratio
+- `WARNING`: at or above the warning ratio
+- `HIGH`: at or above the high ratio
+
+With the default ratios, `WARNING` begins at 2 times the threshold and `HIGH` at 5 times the threshold.
+
+Cooldown is tracked by rule, source, and metric using event time. An equal- or lower-severity repeat is suppressed for 30 seconds by default; a higher-severity event is admitted immediately.
+
+## Time windows and statistics
+
+Windows are half-open intervals, `[start, end)`, aligned to multiples of `window.seconds` on the packet-timestamp axis. Rates use the complete configured window length:
+
+```text
+packets_per_second = packet_count / window_seconds
+bytes_per_second   = byte_count / window_seconds
+```
+
+Consequently, the final partially populated window of a capture can show a lower rate. Gaps of up to `window.max_gap_windows` are stored as empty windows. Larger gaps are skipped and cause the moving baseline to reset.
+
+Per-source SYN, destination-port, and destination-host measurements include only TCP SYN packets without ACK. This prevents normal server replies from being treated as scan attempts. Packets that arrive older than the currently open live window are folded into that window and counted as late.
+
+## Dashboard
+
+Run:
+
+```bash
+streamlit run app.py
+```
+
+The dashboard provides:
+
+- **Overview**: run mode and status, totals, skipped packets, cooldown suppressions, and the latest window
+- **Traffic analytics**: packet and byte rates, protocol distribution, and stored top source IPs
+- **Anomaly events**: rule, severity, and time filters with observed values, thresholds, and explanations
+- **Input & controls**: offline replay, live-session start/stop, and the active configuration
+
+Set dashboard-specific path overrides before starting Streamlit:
+
+Windows PowerShell:
+
+```powershell
+$env:LATTICE_DB = "C:\captures\lattice.db"
+$env:LATTICE_CONFIG = "C:\captures\config.json"
+streamlit run app.py
+```
+
+Linux and macOS:
+
+```bash
+LATTICE_DB=/data/lattice.db LATTICE_CONFIG=/data/config.json streamlit run app.py
+```
+
+These environment variables are read by `app.py`. For the CLI, use the global `--db` and `--config` options instead.
+
+The dashboard has no built-in user authentication. Run it in a trusted environment, particularly because its controls can read server-local capture paths and start live monitoring.
+
+## Configuration
+
+`config.json` is loaded by default. Missing keys use built-in defaults, while unknown keys, invalid types, and out-of-range values cause startup to fail with the offending key named.
+
+| Key | Default | Purpose |
+|---|---:|---|
+| `database.path` | `lattice.db` | SQLite database path |
+| `capture.interface` | `null` | Default live interface |
+| `capture.bpf_filter` | `null` | Default BPF capture filter |
+| `capture.queue_size` | `20000` | Maximum queued live records |
+| `window.seconds` | `5` | Fixed window duration |
+| `window.max_gap_windows` | `12` | Maximum empty windows inserted across a gap |
+| `window.top_talkers` | `10` | Source summaries persisted per window |
+| `window.max_sources_per_window` | `5000` | In-memory source tracking limit |
+| `detection.cooldown_seconds` | `30` | Repeat-event suppression period |
+| `detection.severity.warning_ratio` | `2.0` | Warning boundary for observed/threshold |
+| `detection.severity.high_ratio` | `5.0` | High-severity boundary |
+| `detection.traffic_spike.enabled` | `true` | Enable traffic-spike detection |
+| `detection.traffic_spike.pps_threshold` | `1000` | Absolute packet-rate limit; `null` disables it |
+| `detection.traffic_spike.bps_threshold` | `1000000` | Absolute byte-rate limit; `null` disables it |
+| `detection.traffic_spike.moving_average_multiplier` | `4.0` | Recent-average multiplier; `null` disables it |
+| `detection.traffic_spike.baseline_windows` | `6` | Maximum rate-history length |
+| `detection.traffic_spike.min_baseline_windows` | `3` | Required history before relative comparison |
+| `detection.traffic_spike.min_baseline_pps` | `1.0` | Minimum packet-rate baseline |
+| `detection.traffic_spike.min_baseline_bps` | `100.0` | Minimum byte-rate baseline |
+| `detection.connection_attempts.enabled` | `true` | Enable excessive-SYN detection |
+| `detection.connection_attempts.max_syn_per_source` | `100` | Per-source SYN threshold |
+| `detection.port_scan.enabled` | `true` | Enable scan detection |
+| `detection.port_scan.max_distinct_ports` | `20` | Per-source destination-port threshold |
+| `detection.port_scan.max_distinct_hosts` | `20` | Per-source destination-host threshold; `null` disables it |
+| `detection.unexpected_traffic.enabled` | `true` | Enable allowlist detection |
+| `detection.unexpected_traffic.max_packets` | `10` | Window-wide unexpected-packet threshold |
+| `detection.unexpected_traffic.allowed_protocols` | TCP, UDP, ICMP, ICMPv6, ARP | Permitted protocol names |
+| `detection.unexpected_traffic.allowed_ports` | 22, 53, 80, 123, 443 | Permitted TCP/UDP ports or inclusive ranges such as `"8000-8100"` |
+
+A TCP or UDP packet conforms to the port allowlist when either endpoint port is allowed. This accommodates replies whose service port is the source port, but it also means a sender can evade the check by deliberately using an allowed source port.
+
+Each rule can be disabled independently. Tune thresholds and allowlists for the traffic being monitored; the defaults are examples rather than universal security policy.
 
 ## Database
 
-Tables: `runs` (one per replay or live session), `traffic_stats` (per window), `source_stats` (top talkers per window), `events`. Each window's stats, events and the run totals are written in one transaction. `python -m lattice init-db` creates the schema; `python -m lattice --db test.db reset-db --yes` drops and recreates Lattice tables **only** in a file already marked as a Lattice database, and refuses without `--yes`. Use a dedicated `--db` path for experiments.
+Lattice creates four tables:
 
-## Tests
+- `runs`: one row per replay or live session
+- `traffic_stats`: one row per finalized time window
+- `source_stats`: selected top sources associated with a window
+- `events`: admitted anomaly events
+
+Each window, its source summaries, its events, and the updated run totals are written in one transaction. Foreign keys use cascading deletion, and file-backed databases use SQLite write-ahead logging so dashboard readers do not block the writer.
+
+Create the schema explicitly:
 
 ```bash
-pytest
+python -m lattice --db lattice.db init-db
 ```
 
-Tests use synthetic Scapy packets and temporary databases; they need no privileges, interface or internet.
-
-## Evaluation
+Reset a dedicated Lattice database:
 
 ```bash
-python -m scripts.evaluate                 # generates samples/*.pcap, runs them, writes evaluation/RESULTS.md and results.json
-python -m scripts.evaluate --bench-packets 0   # skip the throughput run
+python -m lattice --db lattice.db reset-db --yes
 ```
 
-Five seeded scenarios: normal traffic, rate spike, SYN burst, port scan, unexpected port/protocol. The report lists expected incidents, detected incidents, missed incidents, false-positive events and processing speed, **all measured by that run**. See `evaluation/RESULTS.md` for the latest numbers. The scenarios are synthetic and were designed alongside the thresholds, so they show that the rules work as specified, not how they would perform on real traffic.
+Reset refuses to proceed without `--yes` and refuses non-Lattice SQLite files. Resetting deletes all stored Lattice runs and results.
+
+## Project structure
+
+```text
+.
+|-- app.py                     Streamlit dashboard
+|-- config.json                Default runtime configuration
+|-- lattice/
+|   |-- capture.py             PCAP input and live capture
+|   |-- cli.py                 Command-line interface
+|   |-- config.py              Configuration models and validation
+|   |-- dashboard_data.py      Dashboard data transformations
+|   |-- detector.py            Detection rules
+|   |-- features.py            Window aggregation and features
+|   |-- live.py                Live-monitor worker
+|   |-- models.py              Shared records and result models
+|   |-- parser.py              Packet normalization
+|   `-- storage.py             SQLite persistence
+|-- scripts/
+|   |-- evaluate.py            Scenario evaluation and report generation
+|   `-- traffic_gen.py         Seeded synthetic PCAP generation
+|-- samples/                   Generated example PCAPs
+|-- evaluation/                Checked-in evaluation results
+`-- tests/                     Unit and integration tests
+```
+
+## Testing and verification
+
+Run the complete test suite:
+
+```bash
+python -m pytest
+```
+
+Tests cover configuration validation, packet parsing, PCAP reading, aggregation, all detection rules, cooldown behavior, SQLite transactions and queries, duplicate replay handling, CLI commands, dashboard data, synthetic evaluation, and live-session lifecycle using a fake sniffer.
+
+The headless dashboard tests require Streamlit. One live-capture test asks Scapy to start on a deliberately invalid interface to verify failure cleanup; it does not intentionally capture real traffic but still exercises the host capture backend.
+
+Generate deterministic sample captures without sending network traffic:
+
+```bash
+python -m scripts.traffic_gen --out samples
+```
+
+Run the synthetic scenario evaluation and refresh `evaluation/results.json` and `evaluation/RESULTS.md`:
+
+```bash
+python -m scripts.evaluate
+```
+
+Skip the optional throughput workload:
+
+```bash
+python -m scripts.evaluate --bench-packets 0
+```
+
+The generated scenarios verify expected behavior under controlled inputs. They do not establish detection accuracy on production traffic.
 
 ## Known limitations
 
-* Threshold rules are simple. They miss slow scans, distributed attacks and anything under the thresholds, and they flag legitimate bursts (backups, software updates). They cannot identify every attack.
-* Scan detection looks only at TCP SYN-without-ACK. UDP/ICMP sweeps and FIN/NULL/Xmas scans are not detected.
-* Rule D's "either port allowed" check can be sidestepped by using an allowed source port.
-* No session reconstruction, IP defragmentation, TLS inspection or payload analysis.
-* PCAPs are loaded into memory (header fields only) so they can be sorted; very large captures need proportionally more RAM. Throughput is limited by Scapy's parsing (≈6k packets/s measured here).
-* Sustained load raises the moving-average baseline, so a long flood stops triggering the *relative* spike rule (the absolute limits still apply).
-* The window clock in live mode follows the machine clock when traffic is idle.
-* Timestamps are shown in UTC.
+- Detection is threshold-based and limited to four traffic patterns. It can miss slow, distributed, or below-threshold activity and flag legitimate bursts.
+- Scan detection observes TCP SYN-without-ACK traffic only. UDP, ICMP, FIN, NULL, Xmas, and application-layer scans are not detected.
+- The system does not reconstruct TCP sessions, deduplicate SYN retransmissions, reassemble IP fragments, inspect TLS content, or analyze payloads.
+- Fixed windows can split a burst or scan across boundaries. A partly populated final window reports a rate based on the complete configured duration.
+- Moving-average spike detection adapts to sustained high traffic, which can stop the relative condition from firing even while load remains high. Absolute limits remain independent.
+- Source tracking is bounded. Packets from sources beyond `window.max_sources_per_window` remain in window totals but do not contribute to per-source SYN or scan rules.
+- Only `window.top_talkers` source summaries are stored per window, so dashboard run-wide source rankings are based on those stored summaries rather than every observed source.
+- Unexpected-traffic detection is only as accurate as its allowlists and can be bypassed with an allowed source port.
+- PCAP replay loads normalized records into memory for timestamp sorting.
+- Live capture can drop packets when the processing queue is full; drops are counted but cannot be analyzed later.
+- Real-interface live capture has not been validated by the automated test suite.
+- Lattice is a monitoring tool, not an intrusion prevention system, and does not take automated response actions.
 
-## Troubleshooting
+## Contributing
 
-* **"Npcap was not found"** (Windows): install Npcap, restart the terminal as Administrator.
-* **"Operation not permitted" / "Permission denied"** (Linux/macOS): run with root or grant `cap_net_raw`.
-* **Interface name rejected**: copy the name exactly from `python -m lattice interfaces`.
-* **"not a Lattice database"**: `database.path` points at some other SQLite file; choose a different path.
-* **Dashboard shows "interrupted"**: a live run was marked running but nothing has written for 30 s (the capturing process probably exited). The stored data is still shown.
-* **Config error at startup**: the message names the key; fix `config.json`.
+Keep changes focused and include tests for behavior changes. Before submitting a change, run:
 
-## How Lattice differs from Zeek and Snort
+```bash
+python -m pytest
+```
 
-Zeek and Snort are mature, production network security monitors: deep protocol analysers, signature/script engines, reassembly of flows, high-rate capture, and large rule ecosystems. Lattice is deliberately tiny: header-level features, four threshold rules, SQLite and a dashboard, meant for learning how traffic statistics and simple anomaly rules work. It is not a replacement for either.
+Changes to configuration, commands, detection semantics, or stored data should include corresponding documentation updates.
+
+## License
+
+This repository does not currently include a license file. Until a license is added, no open-source license grant should be assumed.
