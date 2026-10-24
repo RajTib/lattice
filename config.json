@@ -1,0 +1,48 @@
+{
+  "database": {
+    "path": "lattice.db"
+  },
+  "capture": {
+    "interface": null,
+    "bpf_filter": null,
+    "queue_size": 20000
+  },
+  "window": {
+    "seconds": 5,
+    "max_gap_windows": 12,
+    "top_talkers": 10,
+    "max_sources_per_window": 5000
+  },
+  "detection": {
+    "cooldown_seconds": 30,
+    "severity": {
+      "warning_ratio": 2.0,
+      "high_ratio": 5.0
+    },
+    "traffic_spike": {
+      "enabled": true,
+      "pps_threshold": 1000,
+      "bps_threshold": 1000000,
+      "moving_average_multiplier": 4.0,
+      "baseline_windows": 6,
+      "min_baseline_windows": 3,
+      "min_baseline_pps": 1.0,
+      "min_baseline_bps": 100.0
+    },
+    "connection_attempts": {
+      "enabled": true,
+      "max_syn_per_source": 100
+    },
+    "port_scan": {
+      "enabled": true,
+      "max_distinct_ports": 20,
+      "max_distinct_hosts": 20
+    },
+    "unexpected_traffic": {
+      "enabled": true,
+      "max_packets": 10,
+      "allowed_protocols": ["TCP", "UDP", "ICMP", "ICMPv6", "ARP"],
+      "allowed_ports": [22, 53, 80, 123, 443]
+    }
+  }
+}
