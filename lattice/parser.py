@@ -17,6 +17,7 @@ Classification rules:
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any, Iterator, Optional
 
 # Silence Scapy's import-time banner about missing libpcap providers; capture.py
@@ -48,7 +49,9 @@ def _layers(pkt: Any) -> Iterator[Any]:
 
 
 def _proto_name(number: int) -> str:
-    return _PROTO_NAMES.get(number, f"IP_PROTO_{number}")
+    # Interned: offline replay holds every record in memory, and the same few
+    # protocol names repeat across millions of packets.
+    return sys.intern(_PROTO_NAMES.get(number, f"IP_PROTO_{number}"))
 
 
 def _packet_length(pkt: Any) -> int:
@@ -83,6 +86,10 @@ def parse_packet(pkt: Any) -> PacketRecord:
 
 def _parse(pkt: Any) -> PacketRecord:
     timestamp = float(pkt.time)
+    # A zero-byte record dissects as a default 14-byte Ether frame; without this it
+    # would be counted as a real packet with a fabricated length.
+    if getattr(pkt, "wirelen", None) == 0 and not getattr(pkt, "original", b""):
+        raise PacketParseError("zero-length frame")
     length = _packet_length(pkt)
 
     l3: Any = None
@@ -121,8 +128,8 @@ def _parse_ipv4(ip: Any, timestamp: float, length: int) -> PacketRecord:
         src_port, dst_port, flags = _ports_and_flags(transport)
     return PacketRecord(
         timestamp=timestamp, length=length, protocol=_proto_name(int(ip.proto)),
-        src_ip=str(ip.src), dst_ip=str(ip.dst), src_port=src_port, dst_port=dst_port,
-        tcp_flags=flags, ip_version=4,
+        src_ip=sys.intern(str(ip.src)), dst_ip=sys.intern(str(ip.dst)),
+        src_port=src_port, dst_port=dst_port, tcp_flags=flags, ip_version=4,
     )
 
 
@@ -139,6 +146,6 @@ def _parse_ipv6(ip: Any, timestamp: float, length: int) -> PacketRecord:
     src_port, dst_port, flags = _ports_and_flags(transport)
     return PacketRecord(
         timestamp=timestamp, length=length, protocol=_proto_name(next_header),
-        src_ip=str(ip.src), dst_ip=str(ip.dst), src_port=src_port, dst_port=dst_port,
-        tcp_flags=flags, ip_version=6,
+        src_ip=sys.intern(str(ip.src)), dst_ip=sys.intern(str(ip.dst)),
+        src_port=src_port, dst_port=dst_port, tcp_flags=flags, ip_version=6,
     )

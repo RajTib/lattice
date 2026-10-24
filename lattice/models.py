@@ -33,7 +33,7 @@ class Severity(str, Enum):
 _SEVERITY_RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.HIGH: 2}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PacketRecord:
     """Header-level view of one packet. No payload bytes are retained.
 

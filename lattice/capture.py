@@ -31,21 +31,110 @@ class CaptureError(RuntimeError):
 
 # ---------------------------------------------------------------- offline ---
 
+_PCAP_MAGICS = {
+    b"\xd4\xc3\xb2\xa1": "<", b"\x4d\x3c\xb2\xa1": "<",  # little-endian, microsecond / nanosecond
+    b"\xa1\xb2\xc3\xd4": ">", b"\xa1\xb2\x3c\x4d": ">",  # big-endian
+}
+_PCAPNG_SHB = b"\x0a\x0d\x0d\x0a"
+_PCAPNG_BYTE_ORDER = 0x1A2B3C4D
+_MAX_RECORD_BYTES = 256 * 1024 * 1024  # no real capture record is anywhere near this
+
+
+def _check_capture_framing(file: Path) -> Optional[str]:
+    """Walk record/block framing without reading packet data.
+
+    Scapy silently accepts a file cut off in the middle of a record (classic
+    PCAP) or drops the final block (PCAPNG) without reporting anything, so a
+    truncated or still-being-written capture would otherwise look complete.
+    Returns a description of the first framing problem, ``None`` if the framing is
+    intact or the file is not a recognised capture (Scapy then reports that), and
+    raises :class:`CaptureError` if the file claims to be a capture but its
+    header is invalid.
+    """
+    size = file.stat().st_size
+    with open(file, "rb") as fh:
+        magic = fh.read(4)
+        if magic in _PCAP_MAGICS:
+            return _check_pcap_framing(fh, size, _PCAP_MAGICS[magic], file)
+        if magic == _PCAPNG_SHB:
+            return _check_pcapng_framing(fh, size, file)
+    return None
+
+
+def _check_pcap_framing(fh: Any, size: int, endian: str, file: Path) -> Optional[str]:
+    header = fh.read(20)
+    if len(header) < 20:
+        return None  # too short to be a capture; Scapy reports "not a supported capture file"
+    major = struct.unpack(endian + "H", header[:2])[0]
+    if major != 2:
+        raise CaptureError(f"cannot open {file} as a PCAP file: unsupported format version {major}")
+    pos, number = 24, 0
+    while pos < size:
+        number += 1
+        fh.seek(pos)
+        record = fh.read(16)
+        if len(record) < 16:
+            return f"record {number} at byte {pos} has an incomplete header"
+        caplen = struct.unpack(endian + "I", record[8:12])[0]
+        end = pos + 16 + caplen
+        if caplen > _MAX_RECORD_BYTES or end > size:
+            present = max(0, size - pos - 16)
+            return (f"record {number} at byte {pos} is incomplete "
+                    f"({caplen} captured bytes declared, {present} present)")
+        pos = end
+    return None
+
+
+def _check_pcapng_framing(fh: Any, size: int, file: Path) -> Optional[str]:
+    pos, number, endian = 0, 0, "<"
+    while pos < size:
+        number += 1
+        fh.seek(pos)
+        head = fh.read(12)
+        if len(head) < 12:
+            return f"block {number} at byte {pos} has an incomplete header"
+        if head[:4] == _PCAPNG_SHB:  # each section may use its own byte order
+            order = struct.unpack("<I", head[8:12])[0]
+            if order == _PCAPNG_BYTE_ORDER:
+                endian = "<"
+            elif order == struct.unpack(">I", struct.pack("<I", _PCAPNG_BYTE_ORDER))[0]:
+                endian = ">"
+            else:
+                raise CaptureError(f"cannot open {file} as a PCAPNG file: invalid byte-order magic")
+        elif number == 1:
+            raise CaptureError(f"cannot open {file} as a PCAPNG file: missing section header")
+        total = struct.unpack(endian + "I", head[4:8])[0]
+        if total < 12 or total % 4:
+            return f"block {number} at byte {pos} has an invalid length {total}"
+        if pos + total > size:
+            return (f"block {number} at byte {pos} is incomplete "
+                    f"({total} bytes declared, {size - pos} present)")
+        fh.seek(pos + total - 4)
+        if struct.unpack(endian + "I", fh.read(4))[0] != total:
+            return f"block {number} at byte {pos} has inconsistent length fields"
+        pos += total
+    return None
+
+
 def iter_pcap_records(path: str | Path, stats: IngestStats) -> Iterator[PacketRecord]:
     """Yield parsed records from a PCAP/PCAPNG file in file order.
 
     Malformed packets are counted in ``stats.malformed`` and skipped. A file that
-    ends mid-record stops iteration and sets ``stats.read_error`` (packets read
-    so far are still yielded). A file that cannot be opened raises
+    is truncated or has broken record framing sets ``stats.read_error`` (packets
+    that could be read are still yielded). A file that cannot be opened raises
     :class:`CaptureError`.
     """
     file = Path(path)
     if not file.is_file():
         raise CaptureError(f"PCAP file not found: {file}")
     try:
+        framing_problem = _check_capture_framing(file)
         reader = PcapReader(str(file))
     except (Scapy_Exception, OSError, struct.error, EOFError) as exc:
         raise CaptureError(f"cannot open {file} as a PCAP/PCAPNG file: {exc}") from exc
+    if framing_problem:
+        stats.read_error = framing_problem
+        log.warning("%s is incomplete: %s", file, framing_problem)
     with reader:
         while True:
             try:
@@ -53,7 +142,7 @@ def iter_pcap_records(path: str | Path, stats: IngestStats) -> Iterator[PacketRe
             except StopIteration:
                 return
             except (Scapy_Exception, EOFError, struct.error, OSError) as exc:
-                stats.read_error = f"{type(exc).__name__}: {exc}"
+                stats.read_error = stats.read_error or f"{type(exc).__name__}: {exc}"
                 log.warning("stopped reading %s early: %s", file, stats.read_error)
                 return
             stats.seen += 1

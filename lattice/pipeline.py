@@ -138,8 +138,15 @@ def process_pcap(path: str | Path, config: Config, storage: Storage, *,
         for record in records:
             pipeline.feed(record)
         pipeline.finish()
-    except Exception as exc:
-        storage.finish_run(run_id, "failed", pipeline.totals(), note=f"{type(exc).__name__}: {exc}")
+    except BaseException as exc:
+        # BaseException so Ctrl+C / SystemExit also close the run; otherwise it would
+        # stay "running" forever and look like an analysis still in progress.
+        note = f"{type(exc).__name__}: {exc}" if isinstance(exc, Exception) else \
+            f"interrupted ({type(exc).__name__})"
+        try:
+            storage.finish_run(run_id, "failed", pipeline.totals(), note=note)
+        except StorageError as storage_exc:
+            log.error("could not mark run %s failed: %s", run_id, storage_exc)
         raise
     notes = []
     if ingest.read_error:
