@@ -1,7 +1,7 @@
 """Lattice dashboard.  Run with:  streamlit run app.py
 
-The dashboard only *reads* the SQLite database for display. PCAP processing and
-live capture are started from the Controls tab and write to the same database.
+Views read stored results from SQLite. PCAP processing and live capture can be
+started from the Controls tab and write to the same database.
 Set LATTICE_CONFIG / LATTICE_DB to override the config file or database path.
 """
 from __future__ import annotations
@@ -102,18 +102,26 @@ def render_overview(db_path: str, run_id: int, live: bool) -> None:
         if run["note"]:
             st.caption(f"Note: {run['note']}")
 
-        st.subheader("Most recent window")
+        st.subheader("Traffic summary")
         if not windows:
             st.info("No windows have been stored for this run yet.")
             return
+        analyzed_seconds = sum(max(0.0, row["window_end"] - row["window_start"]) for row in windows)
+        average_pps = sum(row["packets"] for row in windows) / analyzed_seconds if analyzed_seconds else 0.0
+        peak_pps = max(row["packets_per_second"] for row in windows)
+        peak_bps = max(row["bytes_per_second"] for row in windows)
+        cols = st.columns(4)
+        cols[0].metric("Analyzed window time", dd.human_duration(analyzed_seconds))
+        cols[1].metric("Average packets / s", f"{average_pps:.1f}")
+        cols[2].metric("Peak packets / s", f"{peak_pps:.1f}")
+        cols[3].metric("Peak bytes / s", dd.human_bytes(peak_bps) + "/s")
+        st.caption(f"Stored traffic spans {dd.format_time(windows[0]['window_start'])} to "
+                   f"{dd.format_time(windows[-1]['window_end'])}. Averages cover stored windows only.")
+
         last = windows[-1]
-        left, mid, right = st.columns(3)
-        left.metric("Window", f"{dd.format_time(last['window_start'])[11:]} → "
-                              f"{dd.format_time(last['window_end'])[11:]}")
-        mid.metric("Packets / s", f"{last['packets_per_second']:.1f}")
-        right.metric("Bytes / s", dd.human_bytes(last["bytes_per_second"]) + "/s")
         top = sorted(last["protocol_counts"].items(), key=lambda kv: -kv[1])[:5]
-        st.caption("Protocols in this window: " + (", ".join(f"{p} ×{n}" for p, n in top) or "none"))
+        st.caption("Latest stored window: " + dd.format_time(last["window_start"]) + " — " +
+                   (", ".join(f"{p} ×{n}" for p, n in top) or "no packets"))
         if last["untracked_packets"]:
             st.warning(f"{last['untracked_packets']:,} packet(s) in this window came from sources beyond "
                        "the configured source-tracking limit. Per-source rules may be incomplete.")
@@ -149,13 +157,22 @@ def render_traffic(db_path: str, run_id: int, live: bool) -> None:
             protocols = read_db(db_path, lambda s: s.protocol_totals(run_id)) or {}
             st.bar_chart(dd.protocol_series(protocols), height=280)
         with d:
-            st.subheader("Top source IPs")
-            by = st.radio("Rank by", ["packets", "bytes"], horizontal=True, key=f"rank_{run_id}")
+            st.subheader("Top tracked source IPs")
+            by = st.radio("Rank by", ["packets", "bytes", "syn_attempts"], horizontal=True,
+                          key=f"rank_{run_id}")
             sources = read_db(db_path, lambda s: s.top_sources(run_id, by=by, limit=10)) or []
             if sources:
                 table = dd.sources_frame(sources)
-                st.bar_chart(table.set_index("src_ip")[[by]], height=240)
-                st.caption("Sums the per-window top talkers stored for this run.")
+                st.dataframe(
+                    table, hide_index=True, width="stretch",
+                    column_config={
+                        "src_ip": "Source IP",
+                        "packets": st.column_config.NumberColumn("Packets", format="%d"),
+                        "bytes": st.column_config.NumberColumn("Bytes", format="%d"),
+                        "syn_attempts": st.column_config.NumberColumn("SYN attempts", format="%d"),
+                    })
+                st.caption("Ranks sums of the per-window source summaries retained for this run. "
+                           "Sources outside the configured top-talker limit are not represented.")
             else:
                 st.info("No per-source data (traffic without IP headers).")
 
@@ -195,22 +212,54 @@ def render_events(db_path: str, run_id: int, live: bool) -> None:
                        "or time range to inspect later events.")
         else:
             st.write(f"**{len(frame):,}** event(s)")
+        summary = frame[["time", "severity", "rule", "source", "metric", "observed", "threshold", "ratio"]]
         st.dataframe(
-            frame, hide_index=True, use_container_width=True,
+            summary, hide_index=True, width="stretch",
             column_config={
                 "time": st.column_config.DatetimeColumn("Window end (UTC)", format="HH:mm:ss"),
                 "observed": st.column_config.NumberColumn("Observed", format="%.1f"),
                 "threshold": st.column_config.NumberColumn("Threshold", format="%.1f"),
                 "ratio": st.column_config.NumberColumn("Observed ÷ threshold", format="%.1f×"),
-                "targets": "Destinations (sample)",
-                "explanation": st.column_config.TextColumn("Explanation", width="large"),
             })
-        if len(frame) >= 2:
-            st.subheader("Observed vs configured threshold")
-            chart = frame.head(40).reset_index(drop=True)
-            chart.index = [f"{n + 1}. {r.rule.split('_')[0]} {r.source}" for n, r in enumerate(chart.itertuples())]
-            st.bar_chart(chart[["observed", "threshold"]], height=260)
-            st.caption("Showing the first 40 events from the filtered table.")
+
+        st.subheader("Inspect an event")
+        selected = st.selectbox(
+            "Event", range(len(events)), key=f"event_picker_{run_id}",
+            format_func=lambda index: (
+                f"{dd.format_time(events[index]['ts'])} · {events[index]['severity']} · "
+                f"{events[index]['rule']} · {events[index]['src_ip'] or 'all sources'}"))
+        event = events[selected]
+        left, middle, right = st.columns(3)
+        left.metric("Observed", f"{event['observed']:g}", help=event["metric"])
+        middle.metric("Configured threshold", f"{event['threshold']:g}")
+        ratio = event["observed"] / event["threshold"] if event["threshold"] else float("nan")
+        right.metric("Observed / threshold", f"{ratio:.2f}×")
+        st.write(event["explanation"])
+        detail = [f"Severity: **{event['severity']}**", f"Rule: `{event['rule']}`",
+                  f"Window: {dd.format_time(event['window_start'])} to {dd.format_time(event['window_end'])}"]
+        if event["src_ip"]:
+            detail.insert(2, f"Source: `{event['src_ip']}`")
+        st.caption(" · ".join(detail))
+        if event["dst_info"]:
+            st.caption(f"Destination sample: {event['dst_info']}")
+
+        span = event["window_end"] - event["window_start"]
+        context_rows = read_db(
+            db_path, lambda s: s.query_windows(
+                run_id, event["window_start"] - span, event["window_end"] + span)) or []
+        if context_rows:
+            st.markdown("**Traffic around this event**")
+            st.caption("The event window plus the immediately adjacent stored windows, when available.")
+            context = dd.event_context_frame(context_rows, event["window_start"])
+            st.dataframe(
+                context, hide_index=True, width="stretch",
+                column_config={
+                    "window": st.column_config.DatetimeColumn("Window start (UTC)", format="HH:mm:ss"),
+                    "relation": "Position",
+                    "packets_per_second": st.column_config.NumberColumn("Packets / s", format="%.1f"),
+                    "bytes_per_second": st.column_config.NumberColumn("Bytes / s", format="%.1f"),
+                    "unexpected_packets": "Unexpected packets",
+                })
 
     body()
 
@@ -234,13 +283,16 @@ def render_controls(db_path: str, config: Config, config_path: Optional[str]) ->
             else:
                 st.session_state["selected_run"] = summary.run_id
                 if summary.duplicate:
-                    st.info(f"Already processed as run #{summary.run_id}; showing the stored results.")
+                    st.session_state["replay_notice"] = (
+                        "info", f"Already processed as run #{summary.run_id}; showing the stored results.")
                 else:
-                    st.success(f"Run #{summary.run_id}: {summary.packets:,} packets, {summary.windows} windows, "
-                               f"{summary.events} events, {summary.skipped_packets} skipped, in "
-                               f"{summary.elapsed_seconds:.2f}s.")
+                    st.session_state["replay_notice"] = (
+                        "success", f"Run #{summary.run_id}: {summary.packets:,} packets, "
+                        f"{summary.windows} windows, {summary.events} events, "
+                        f"{summary.skipped_packets} skipped, in {summary.elapsed_seconds:.2f}s.")
                 if summary.note:
-                    st.warning(summary.note)
+                    st.session_state["replay_warning"] = summary.note
+                st.rerun()
 
     st.divider()
     st.subheader("Live capture")
@@ -293,7 +345,7 @@ def main() -> None:
         return
 
     st.title("Lattice")
-    st.caption("Passive network traffic analysis and anomaly detection · educational prototype")
+    st.caption("Passive network traffic analysis and anomaly detection")
 
     with st.sidebar:
         st.header("Data")
@@ -316,7 +368,14 @@ def main() -> None:
     run = next((r for r in runs if r["id"] == run_id), None)
     kind, message = dd.data_mode(run, seconds_since_write(db_path))
     live = kind == "live"
-    {"live": st.success, "historical": st.info, "interrupted": st.warning, "none": st.info}[kind](message)
+    {"live": st.success, "active": st.info, "historical": st.info, "interrupted": st.warning,
+     "partial": st.warning, "failed": st.error, "none": st.info}[kind](message)
+    notice = st.session_state.pop("replay_notice", None)
+    if notice:
+        getattr(st, notice[0])(notice[1])
+    replay_warning = st.session_state.pop("replay_warning", None)
+    if replay_warning:
+        st.warning(replay_warning)
 
     overview, traffic, events, controls = st.tabs(["Overview", "Traffic analytics", "Anomaly events",
                                                    "Input & controls"])

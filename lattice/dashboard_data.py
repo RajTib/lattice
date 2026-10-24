@@ -23,6 +23,18 @@ def human_bytes(n: float) -> str:
     return f"{value:.1f} GiB"
 
 
+def human_duration(seconds: float) -> str:
+    """Compact duration for traffic coverage, without implying wall-clock uptime."""
+    value = max(0.0, float(seconds))
+    if value < 60:
+        return f"{value:g} s"
+    minutes, remainder = divmod(int(value), 60)
+    if minutes < 60:
+        return f"{minutes}m {remainder:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
 def to_datetime(ts: float) -> dt.datetime:
     return dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
 
@@ -37,12 +49,20 @@ def run_label(run: dict[str, Any]) -> str:
 
 
 def data_mode(run: Optional[dict[str, Any]], seconds_since_db_write: Optional[float]) -> tuple[str, str]:
-    """``(kind, message)`` where kind is ``live``, ``historical``, ``interrupted`` or ``none``."""
+    """Return the display state and an accurate status explanation for a run."""
     if run is None:
         return "none", "No run selected."
+    if run["status"] == "failed":
+        return "failed", ("Failed run: processing did not finish. Stored results may be incomplete; "
+                          "review the run note and storage-error count below.")
+    if run["status"] == "partial":
+        return "partial", ("Partial run: some input or results could not be processed or stored. "
+                           "Use the available data with caution and review the run note below.")
     if run["status"] == "running":
         if seconds_since_db_write is not None and seconds_since_db_write <= STALE_AFTER_SECONDS:
-            return "live", "Live: this run is still being written; the view refreshes automatically."
+            if run["mode"] == "live":
+                return "live", "Live: this run is still being written; the view refreshes automatically."
+            return "active", "In progress: this PCAP run is still being written. Reload to see new results."
         return "interrupted", ("This run is marked 'running' but the database has not been updated recently; "
                                "the capturing process probably exited without closing it. Showing stored data.")
     if run["mode"] == "live":
@@ -70,6 +90,25 @@ def events_frame(rows: Sequence[dict[str, Any]]) -> pd.DataFrame:
           "observed": r["observed"], "threshold": r["threshold"],
           "ratio": r["observed"] / r["threshold"] if r["threshold"] else float("nan"),
           "explanation": r["explanation"]} for r in rows],
+        columns=columns)
+
+
+def event_context_frame(rows: Sequence[dict[str, Any]], event_start: float) -> pd.DataFrame:
+    """Compact before/event/after traffic rows for one selected detection event."""
+    columns = ["window", "relation", "packets", "packets_per_second", "bytes",
+               "bytes_per_second", "unexpected_packets", "protocols"]
+    return pd.DataFrame(
+        [{
+            "window": to_datetime(r["window_start"]),
+            "relation": "event" if r["window_start"] == event_start
+            else ("before" if r["window_start"] < event_start else "after"),
+            "packets": r["packets"],
+            "packets_per_second": r["packets_per_second"],
+            "bytes": r["bytes"],
+            "bytes_per_second": r["bytes_per_second"],
+            "unexpected_packets": r["unexpected_packets"],
+            "protocols": ", ".join(f"{name} {count}" for name, count in r["protocol_counts"].items()) or "-",
+        } for r in rows],
         columns=columns)
 
 

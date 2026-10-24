@@ -8,7 +8,7 @@ from lattice import dashboard_data as dd
 from lattice.pipeline import process_pcap
 from lattice.storage import Storage
 
-from factories import make_config
+from factories import make_config, udp_packet, write_pcap
 from test_pipeline import CONFIG, attack_pcap
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
@@ -56,13 +56,30 @@ def test_human_bytes():
     assert dd.human_bytes(1536) == "1.5 KiB" and dd.human_bytes(5 * 1024 ** 3) == "5.0 GiB"
 
 
+def test_human_duration_and_event_context():
+    assert dd.human_duration(5) == "5 s"
+    assert dd.human_duration(65) == "1m 05s"
+    assert dd.human_duration(7265) == "2h 01m"
+    rows = [
+        {"window_start": start, "packets": 10, "packets_per_second": 2.0, "bytes": 100,
+         "bytes_per_second": 20.0, "unexpected_packets": 0, "protocol_counts": {"TCP": 10}}
+        for start in (0.0, 5.0, 10.0)
+    ]
+    context = dd.event_context_frame(rows, 5.0)
+    assert list(context["relation"]) == ["before", "event", "after"]
+    assert list(context["protocols"]) == ["TCP 10"] * 3
+
+
 @pytest.mark.parametrize("run,age,kind", [
     (None, None, "none"),
     ({"status": "running", "mode": "live"}, 2.0, "live"),
+    ({"status": "running", "mode": "pcap"}, 2.0, "active"),
     ({"status": "running", "mode": "live"}, 600.0, "interrupted"),
     ({"status": "running", "mode": "live"}, None, "interrupted"),
     ({"status": "completed", "mode": "pcap"}, 0.0, "historical"),
     ({"status": "stopped", "mode": "live"}, 0.0, "historical"),
+    ({"status": "partial", "mode": "pcap"}, 0.0, "partial"),
+    ({"status": "failed", "mode": "pcap"}, 0.0, "failed"),
 ])
 def test_data_mode_distinguishes_live_from_historical(run, age, kind):
     assert dd.data_mode(run, age)[0] == kind
@@ -88,9 +105,78 @@ def test_app_shows_persisted_statistics_and_events(populated, tmp_path, monkeypa
     assert metrics["Packets processed"] == "350"
     assert metrics["Detected events"] == "4" and metrics["Windows"] == "8"
     assert metrics["Mode"] == "PCAP" and metrics["Status"] == "completed"
+    assert "Peak packets / s" in metrics and "Average packets / s" in metrics
     assert any("Historical" in i.value for i in at.info)       # clearly labelled as stored data
-    assert at.dataframe, "events table was not rendered"
-    assert len(at.dataframe[-1].value) == 4
+    event_tables = [table.value for table in at.dataframe if "rule" in table.value.columns]
+    assert event_tables and len(event_tables[0]) == 4
+    context_tables = [table.value for table in at.dataframe if "relation" in table.value.columns]
+    assert context_tables and "event" in set(context_tables[0]["relation"])
+    assert any(box.label == "Event" for box in at.selectbox)
+
+
+def test_event_filters_update_summary_and_inspector(populated, tmp_path, monkeypatch):
+    db, cfg, _ = populated
+    at = run_app(db, cfg, tmp_path, monkeypatch)
+    at.multiselect[0].set_value(["possible_port_scan"]).run()
+    assert not at.exception, [e.value for e in at.exception]
+    event_tables = [table.value for table in at.dataframe if "rule" in table.value.columns]
+    assert event_tables and set(event_tables[0]["rule"]) == {"possible_port_scan"}
+    event_pickers = [box for box in at.selectbox if box.label == "Event"]
+    assert len(event_pickers) == 1 and event_pickers[0].value == 0
+
+
+def test_app_normal_run_has_clear_no_event_state(tmp_path, monkeypatch):
+    db = tmp_path / "normal.db"
+    cfg_obj = make_config()
+    capture = write_pcap(tmp_path / "normal.pcap", [udp_packet(i / 2, dport=53) for i in range(10)])
+    with Storage(db) as storage:
+        process_pcap(capture, cfg_obj, storage)
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps(cfg_obj.to_dict()), encoding="utf-8")
+
+    at = run_app(db, cfg, tmp_path, monkeypatch)
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("No events match" in info.value for info in at.info)
+
+
+def test_dashboard_processes_sample_and_selects_new_run(tmp_path, monkeypatch):
+    db = tmp_path / "dashboard-replay.db"
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps(make_config().to_dict()), encoding="utf-8")
+    at = run_app(db, cfg, tmp_path, monkeypatch)
+
+    sample = next(box for box in at.selectbox if box.label == "Sample files (samples/)")
+    sample.set_value("normal.pcap").run()
+    process = next(button for button in at.button if button.label == "Process PCAP")
+    process.click().run(timeout=60)
+
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("2,395 packets" in message.value for message in at.success)
+    metrics = {metric.label: metric.value for metric in at.metric}
+    assert metrics["Packets processed"] == "2,395" and metrics["Status"] == "completed"
+    with Storage(db, read_only=True) as storage:
+        (run,) = storage.list_runs()
+    assert run["packets"] == 2395 and run["events"] == 0
+
+
+@pytest.mark.parametrize("status,expected", [
+    ("partial", "Partial run"),
+    ("failed", "Failed run"),
+])
+def test_app_highlights_incomplete_runs(tmp_path, monkeypatch, status, expected):
+    db = tmp_path / f"{status}.db"
+    with Storage(db) as storage:
+        run_id = storage.start_run("pcap", "input.pcap")
+        storage.finish_run(run_id, status, {
+            "packets": 0, "bytes": 0, "windows": 0, "events": 0,
+            "suppressed_events": 0, "skipped_packets": 1, "storage_errors": 0,
+        }, "input could not be read completely")
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps(make_config().to_dict()), encoding="utf-8")
+
+    at = run_app(db, cfg, tmp_path, monkeypatch)
+    messages = [item.value for item in (*at.warning, *at.error)]
+    assert any(expected in message for message in messages)
 
 
 def test_app_empty_state_without_a_database(tmp_path, monkeypatch):

@@ -206,10 +206,12 @@ streamlit run app.py
 
 The dashboard provides:
 
-- **Overview**: run mode and status, totals, skipped packets, cooldown suppressions, and the latest window
-- **Traffic analytics**: packet and byte rates, protocol distribution, and stored top source IPs
-- **Anomaly events**: rule, severity, and time filters with observed values, thresholds, and explanations
+- **Overview**: run status, processing totals, analyzed window time, average and peak rates, skipped packets, and cooldown suppressions
+- **Traffic analytics**: packet and byte rate timelines, protocol distribution, and exact stored source totals ranked by packets, bytes, or TCP SYN attempts
+- **Anomaly events**: rule, severity, and time filters plus a focused event inspector showing the explanation, observed value, configured threshold, sampled destinations, and the adjacent traffic windows
 - **Input & controls**: offline replay, live-session start/stop, and the active configuration
+
+Failed and partial runs are called out explicitly. Processing a capture from the dashboard refreshes the run list and selects the resulting run automatically.
 
 Set dashboard-specific path overrides before starting Streamlit:
 
