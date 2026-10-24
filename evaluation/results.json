@@ -1,7 +1,7 @@
 {
   "seed": 1234,
-  "measured_at": "2026-10-24 12:19:46",
-  "machine": "Windows 11, Python 3.14.8",
+  "measured_at": "2026-10-24 15:48:46",
+  "machine": "Windows 11, Python 3.13.5",
   "window_seconds": 5.0,
   "scenarios": [
     {
@@ -16,8 +16,8 @@
       "false_positive_events": [],
       "events": [],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 0.525,
-      "packets_per_second_processed": 4562
+      "processing_seconds": 1.0422,
+      "packets_per_second_processed": 2298
     },
     {
       "scenario": "rate_spike",
@@ -50,8 +50,8 @@
         }
       ],
       "suppressed_by_cooldown": 2,
-      "processing_seconds": 0.8799,
-      "packets_per_second_processed": 7304
+      "processing_seconds": 2.5434,
+      "packets_per_second_processed": 2527
     },
     {
       "scenario": "syn_flood",
@@ -75,8 +75,8 @@
         }
       ],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 0.3527,
-      "packets_per_second_processed": 7038
+      "processing_seconds": 1.0241,
+      "packets_per_second_processed": 2424
     },
     {
       "scenario": "port_scan",
@@ -109,8 +109,83 @@
         }
       ],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 0.3568,
-      "packets_per_second_processed": 7056
+      "processing_seconds": 1.072,
+      "packets_per_second_processed": 2349
+    },
+    {
+      "scenario": "host_sweep",
+      "description": "One source SYN-probes port 443 on 30 hosts in 3 s (t=60-63).",
+      "packets": 2478,
+      "windows": 24,
+      "expected_incidents": 1,
+      "detected_incidents": 1,
+      "missed_incidents": [],
+      "events_total": 1,
+      "false_positive_events": [],
+      "events": [
+        {
+          "rule": "possible_port_scan",
+          "metric": "distinct_destination_hosts",
+          "severity": "INFO",
+          "src_ip": "203.0.113.70",
+          "t": 60.0,
+          "observed": 30.0,
+          "threshold": 20.0
+        }
+      ],
+      "suppressed_by_cooldown": 0,
+      "processing_seconds": 1.0786,
+      "packets_per_second_processed": 2297
+    },
+    {
+      "scenario": "unexpected_protocol",
+      "description": "A host sends 20 GRE packets (IP protocol 47) (t=60-64).",
+      "packets": 2401,
+      "windows": 24,
+      "expected_incidents": 1,
+      "detected_incidents": 1,
+      "missed_incidents": [],
+      "events_total": 1,
+      "false_positive_events": [],
+      "events": [
+        {
+          "rule": "unexpected_protocol_or_port",
+          "metric": "unexpected_packets",
+          "severity": "WARNING",
+          "src_ip": "192.168.1.12",
+          "t": 60.0,
+          "observed": 20.0,
+          "threshold": 10.0
+        }
+      ],
+      "suppressed_by_cooldown": 0,
+      "processing_seconds": 1.0848,
+      "packets_per_second_processed": 2213
+    },
+    {
+      "scenario": "unexpected_port",
+      "description": "A host sends 20 TCP packets to port 31337 (t=60-64).",
+      "packets": 2433,
+      "windows": 24,
+      "expected_incidents": 1,
+      "detected_incidents": 1,
+      "missed_incidents": [],
+      "events_total": 1,
+      "false_positive_events": [],
+      "events": [
+        {
+          "rule": "unexpected_protocol_or_port",
+          "metric": "unexpected_packets",
+          "severity": "WARNING",
+          "src_ip": "192.168.1.12",
+          "t": 60.0,
+          "observed": 20.0,
+          "threshold": 10.0
+        }
+      ],
+      "suppressed_by_cooldown": 0,
+      "processing_seconds": 0.7906,
+      "packets_per_second_processed": 3077
     },
     {
       "scenario": "unexpected_traffic",
@@ -134,17 +209,17 @@
         }
       ],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 0.3524,
-      "packets_per_second_processed": 6916
+      "processing_seconds": 1.0306,
+      "packets_per_second_processed": 2365
     }
   ],
   "totals": {
-    "scenarios": 5,
-    "packets": 16259,
-    "expected_incidents": 5,
-    "detected_incidents": 5,
+    "scenarios": 8,
+    "packets": 23571,
+    "expected_incidents": 8,
+    "detected_incidents": 8,
     "missed_incidents": 0,
-    "events_total": 6,
+    "events_total": 9,
     "false_positive_events": 0
   },
   "benchmark": {
@@ -152,7 +227,7 @@
     "windows": 1000,
     "events": 0,
     "file_mib": 50.72,
-    "processing_seconds": 16.644,
-    "packets_per_second_processed": 5999
+    "processing_seconds": 30.878,
+    "packets_per_second_processed": 3234
   }
 }

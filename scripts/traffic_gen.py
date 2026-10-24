@@ -11,7 +11,10 @@ behaviour starting at t = 60 s):
 * ``rate_spike``         one client suddenly sends ~400 pkt/s of HTTPS data for 10 s
 * ``syn_flood``          one source opens 180 connections to a single port in 5 s
 * ``port_scan``          one source SYN-probes 60 distinct ports in 3 s
-* ``unexpected_traffic`` TCP to port 31337 plus IP protocol 47 (GRE) from one host
+* ``host_sweep``         one source SYN-probes 30 distinct destination hosts
+* ``unexpected_protocol`` IP protocol 47 (GRE) from one host
+* ``unexpected_port``    TCP traffic to port 31337 from one host
+* ``unexpected_traffic`` combined unexpected-port and GRE traffic
 
 Addresses are RFC 1918 / RFC 5737 documentation ranges.
 
@@ -41,7 +44,8 @@ INJECT_AT = 60
 
 CLIENTS = [f"192.168.1.{n}" for n in range(10, 15)]
 WEB, DNS, NTP, GATEWAY = "10.0.0.2", "10.0.0.53", "10.0.0.123", "192.168.1.1"
-ATTACKER_FLOOD, ATTACKER_SCAN, ODD_HOST = "203.0.113.50", "203.0.113.60", "192.168.1.12"
+ATTACKER_FLOOD, ATTACKER_SCAN, ATTACKER_SWEEP = "203.0.113.50", "203.0.113.60", "203.0.113.70"
+ODD_HOST = "192.168.1.12"
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,23 @@ def build_scenarios(seed: int = 1234) -> list[Scenario]:
     sc.incidents.append(Incident("possible_port_scan", 60, 65, ATTACKER_SCAN, "60 distinct ports vs limit 20"))
     sc.incidents.append(Incident("unexpected_protocol_or_port", 60, 65, ATTACKER_SCAN,
                                  "co-detection: probed ports are outside the allowlist"))
+
+    sc, rng = new("host_sweep", "One source SYN-probes port 443 on 30 hosts in 3 s (t=60-63).")
+    sc.packets += [tcp(at + i / 10, ATTACKER_SWEEP, f"198.51.100.{i + 1}", 42000, 443, "S")
+                   for i in range(30)]
+    sc.incidents.append(Incident("possible_port_scan", 60, 65, ATTACKER_SWEEP,
+                                 "30 distinct hosts vs limit 20"))
+
+    sc, rng = new("unexpected_protocol", "A host sends 20 GRE packets (IP protocol 47) (t=60-64).")
+    sc.packets += [_stamp(_eth() / IP(src=ODD_HOST, dst=WEB, proto=47) / Raw(b"\0" * 40), at + i / 5)
+                   for i in range(20)]
+    sc.incidents.append(Incident("unexpected_protocol_or_port", 60, 65, ODD_HOST,
+                                 "20 packets use an unexpected IP protocol vs limit 10"))
+
+    sc, rng = new("unexpected_port", "A host sends 20 TCP packets to port 31337 (t=60-64).")
+    sc.packets += [tcp(at + i / 5, ODD_HOST, WEB, 50100, 31337, "A", 80) for i in range(20)]
+    sc.incidents.append(Incident("unexpected_protocol_or_port", 60, 65, ODD_HOST,
+                                 "20 packets use an unexpected TCP port vs limit 10"))
 
     sc, rng = new("unexpected_traffic", "A host sends TCP to port 31337 and GRE (IP protocol 47) (t=60-65).")
     sc.packets += [tcp(at + i / 10, ODD_HOST, WEB, 50100, 31337, "A", 80) for i in range(40)]

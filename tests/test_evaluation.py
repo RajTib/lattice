@@ -27,11 +27,14 @@ def test_each_attack_scenario_raises_its_rule(result):
     assert rules["rate_spike"] == {"traffic_spike"}
     assert rules["syn_flood"] == {"excessive_connection_attempts"}
     assert rules["port_scan"] == {"possible_port_scan", "unexpected_protocol_or_port"}
+    assert rules["host_sweep"] == {"possible_port_scan"}
+    assert rules["unexpected_protocol"] == {"unexpected_protocol_or_port"}
+    assert rules["unexpected_port"] == {"unexpected_protocol_or_port"}
     assert rules["unexpected_traffic"] == {"unexpected_protocol_or_port"}
 
 
 def test_totals_and_markdown_report(result):
-    assert result["totals"]["scenarios"] == 5
+    assert result["totals"]["scenarios"] == 8
     assert result["totals"]["missed_incidents"] == 0 and result["totals"]["false_positive_events"] == 0
     text = render_markdown(result)
     assert "measured by that run" in text and "| syn_flood |" in text
