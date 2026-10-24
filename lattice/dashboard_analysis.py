@@ -78,6 +78,30 @@ def _metric_label(metric: str) -> str:
     }.get(metric, metric.replace("_", " "))
 
 
+def _display_utc(ts: Any) -> str:
+    value = _utc(ts)
+    return value.replace("T", " ").replace("Z", " UTC") if value else "an unknown time"
+
+
+def _display_measurement(metric: str, value: Any) -> str:
+    number = float(value or 0)
+    if metric == "packets_per_second":
+        return f"{number:,.1f} packets/s"
+    if metric == "bytes_per_second":
+        scaled = number
+        for unit in ("B/s", "KiB/s", "MiB/s", "GiB/s"):
+            if abs(scaled) < 1024 or unit == "GiB/s":
+                return f"{scaled:,.0f} {unit}" if unit == "B/s" else f"{scaled:,.1f} {unit}"
+            scaled /= 1024
+    unit = {
+        "syn_attempts": "SYN packets",
+        "distinct_destination_ports": "destination ports",
+        "distinct_destination_hosts": "destination hosts",
+        "unexpected_packets": "unexpected packets",
+    }.get(metric, metric.replace("_", " "))
+    return f"{number:,.0f} {unit}"
+
+
 def investigation_guidance(event: dict[str, Any]) -> str:
     """Return a conservative next step for a stored detection event."""
     return _NEXT_STEPS.get(
@@ -113,8 +137,9 @@ def generate_findings(
         findings.append(Finding(
             category="detection",
             title=_RULE_TITLES.get(rule, rule.replace("_", " ").capitalize()),
-            summary=(f"Peak {_metric_label(metric)} was {peak['observed']:g} against a "
-                     f"threshold of {peak['threshold']:g}{source}{repeat}."),
+            summary=(f"At {_display_utc(peak.get('ts'))}, the detector observed "
+                     f"{_display_measurement(metric, peak['observed'])} against a threshold of "
+                     f"{_display_measurement(metric, peak['threshold'])}{source}{repeat}."),
             significance=100 + severity_rank.get(peak["severity"], 0) * 10 + _ratio(peak),
             severity=peak["severity"],
             event_id=int(peak["id"]),
@@ -143,7 +168,8 @@ def generate_findings(
             findings.append(Finding(
                 category="observation",
                 title="A traffic window stands above the typical rate",
-                summary=(f"The peak was {peak_rate:.1f} packets/s, {ratio:.1f}× the median non-empty "
+                summary=(f"At {_display_utc(peak_row.get('window_start'))}, the peak was "
+                         f"{peak_rate:.1f} packets/s, {ratio:.1f}× the median non-empty "
                          f"window rate of {baseline:.1f} packets/s."),
                 significance=ratio,
                 investigation="Review the peak window alongside its protocols and leading sources.",

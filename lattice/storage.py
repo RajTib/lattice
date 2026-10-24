@@ -299,7 +299,8 @@ class Storage:
 
     @staticmethod
     def _event_filter(run_id: Optional[int], start: Optional[float], end: Optional[float],
-                      rules: Optional[Sequence[str]], severities: Optional[Sequence[str]]) \
+                      rules: Optional[Sequence[str]], severities: Optional[Sequence[str]],
+                      search: Optional[str] = None) \
             -> tuple[list[str], list[Any]]:
         clauses, params = ["1 = 1"], []
         if run_id is not None:
@@ -318,23 +319,39 @@ class Storage:
                     continue
                 clauses.append(f"{column} IN ({', '.join('?' * len(values))})")
                 params.extend(values)
+        if search and search.strip():
+            searchable = " || ' ' || ".join(
+                f"COALESCE({column}, '')" for column in
+                ("rule", "severity", "metric", "src_ip", "dst_info", "explanation"))
+            clauses.append(f"INSTR(LOWER({searchable}), LOWER(?)) > 0")
+            params.append(search.strip())
         return clauses, params
 
     def query_events(self, run_id: Optional[int] = None, start: Optional[float] = None,
                      end: Optional[float] = None, rules: Optional[Sequence[str]] = None,
                      severities: Optional[Sequence[str]] = None,
-                     limit: int = 1000) -> list[dict[str, Any]]:
-        """Events filtered by run, time range (``start <= ts <= end``), rule and severity."""
-        clauses, params = self._event_filter(run_id, start, end, rules, severities)
-        params.append(int(limit))
-        return self._query("SELECT * FROM events WHERE " + " AND ".join(clauses) +
-                           " ORDER BY ts, id LIMIT ?", params)
+                     limit: Optional[int] = 1000,
+                     search: Optional[str] = None) -> list[dict[str, Any]]:
+        """Return filtered events in stable timestamp order.
+
+        ``search`` is a literal, case-insensitive substring match across the
+        human-readable event fields. Passing ``limit=None`` returns every
+        matching row, which is intended for explicit exports rather than
+        interactive tables.
+        """
+        clauses, params = self._event_filter(run_id, start, end, rules, severities, search)
+        sql = "SELECT * FROM events WHERE " + " AND ".join(clauses) + " ORDER BY ts, id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return self._query(sql, params)
 
     def count_events(self, run_id: Optional[int] = None, start: Optional[float] = None,
                      end: Optional[float] = None, rules: Optional[Sequence[str]] = None,
-                     severities: Optional[Sequence[str]] = None) -> int:
+                     severities: Optional[Sequence[str]] = None,
+                     search: Optional[str] = None) -> int:
         """Count events using the same filters as :meth:`query_events`."""
-        clauses, params = self._event_filter(run_id, start, end, rules, severities)
+        clauses, params = self._event_filter(run_id, start, end, rules, severities, search)
         return int(self._query("SELECT COUNT(*) AS n FROM events WHERE " + " AND ".join(clauses),
                                params)[0]["n"])
 

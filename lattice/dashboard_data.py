@@ -35,6 +35,52 @@ def human_duration(seconds: float) -> str:
     return f"{hours}h {minutes:02d}m"
 
 
+def measurement_text(metric: str, value: float) -> str:
+    """Format a detector measurement with the unit users need to interpret it."""
+    number = float(value)
+    if metric == "packets_per_second":
+        return f"{number:,.1f} packets/s"
+    if metric == "bytes_per_second":
+        return f"{human_bytes(number)}/s"
+    unit = {
+        "syn_attempts": "SYN packets",
+        "distinct_destination_ports": "destination ports",
+        "distinct_destination_hosts": "destination hosts",
+        "unexpected_packets": "unexpected packets",
+    }.get(metric, metric.replace("_", " "))
+    return f"{number:,.0f} {unit}"
+
+
+def measurement_value(metric: str, value: float) -> str:
+    """Format a compact value for a metric card whose label supplies context."""
+    number = float(value)
+    if metric == "packets_per_second":
+        return f"{number:,.1f} packets/s"
+    if metric == "bytes_per_second":
+        return f"{human_bytes(number)}/s"
+    return f"{number:,.0f}"
+
+
+def metric_label(metric: str) -> str:
+    return {
+        "packets_per_second": "Packet rate",
+        "bytes_per_second": "Byte rate",
+        "syn_attempts": "SYN packets",
+        "distinct_destination_ports": "Destination ports",
+        "distinct_destination_hosts": "Destination hosts",
+        "unexpected_packets": "Unexpected packets",
+    }.get(metric, metric.replace("_", " ").capitalize())
+
+
+def rule_label(rule: str) -> str:
+    return {
+        "traffic_spike": "Traffic spike",
+        "excessive_connection_attempts": "Excessive SYN activity",
+        "possible_port_scan": "Port scan / host sweep",
+        "unexpected_protocol_or_port": "Unexpected traffic",
+    }.get(rule, rule.replace("_", " ").capitalize())
+
+
 def to_datetime(ts: float) -> dt.datetime:
     return dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
 
@@ -91,6 +137,47 @@ def events_frame(rows: Sequence[dict[str, Any]]) -> pd.DataFrame:
           "ratio": r["observed"] / r["threshold"] if r["threshold"] else float("nan"),
           "explanation": r["explanation"]} for r in rows],
         columns=columns)
+
+
+def event_markers(windows: Sequence[dict[str, Any]], events: Sequence[dict[str, Any]],
+                  metric: str) -> pd.DataFrame:
+    """Aggregate overlapping events onto their exact persisted traffic window.
+
+    A single marker per window avoids hiding repeated rule matches at the same
+    x/y coordinate while retaining their count, rules, and highest severity in
+    the tooltip.
+    """
+    rates = {float(row["window_start"]): float(row[metric]) for row in windows}
+    groups: dict[float, list[dict[str, Any]]] = {}
+    for event in events:
+        start = float(event["window_start"])
+        if start in rates:
+            groups.setdefault(start, []).append(event)
+    severity_rank = {"INFO": 1, "WARNING": 2, "HIGH": 3}
+    rows = []
+    for start, matches in sorted(groups.items()):
+        severity = max(matches, key=lambda item: severity_rank.get(item["severity"], 0))["severity"]
+        rules = sorted({rule_label(str(item["rule"])) for item in matches})
+        rows.append({
+            "time": to_datetime(start),
+            "utc": format_time(start),
+            "value": rates[start],
+            "severity": severity,
+            "events": len(matches),
+            "rules": ", ".join(rules),
+        })
+    return pd.DataFrame(rows, columns=["time", "utc", "value", "severity", "events", "rules"])
+
+
+def protocol_frame(counts: dict[str, int]) -> pd.DataFrame:
+    """Return sorted protocol totals and packet shares for display."""
+    total = sum(max(0, int(value)) for value in counts.values())
+    return pd.DataFrame([
+        {"protocol": name, "packets": int(count), "share": int(count) / total if total else 0.0,
+         "share_label": ("<0.1%" if total and 0 < int(count) / total < 0.001
+                         else f"{int(count) / total:.1%}" if total else "0.0%")}
+        for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ], columns=["protocol", "packets", "share", "share_label"])
 
 
 def event_context_frame(rows: Sequence[dict[str, Any]], event_start: float) -> pd.DataFrame:

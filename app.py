@@ -21,6 +21,7 @@ from lattice.pipeline import process_pcap
 from lattice.storage import Storage, StorageError
 
 REFRESH_SECONDS = 3
+EVENT_UI_LIMIT = 2000
 SAMPLES_DIR = Path(__file__).resolve().parent / "samples"
 
 st.set_page_config(page_title="Lattice", page_icon=":material/hub:", layout="wide",
@@ -77,34 +78,70 @@ def load_run_data(db_path: str, run_id: int):
     return read_db(db_path, query) or (None, [], [], [], {})
 
 
+def load_export_data(db_path: str, run_id: int):
+    """Load complete persisted results for an explicit user export."""
+    def query(storage: Storage):
+        return (storage.get_run(run_id), storage.query_windows(run_id),
+                storage.query_events(run_id, limit=None),
+                storage.top_sources(run_id, by="packets", limit=1000),
+                storage.protocol_totals(run_id))
+    return read_db(db_path, query) or (None, [], [], [], {})
+
+
 def traffic_chart(windows: list[dict[str, Any]], events: list[dict[str, Any]],
                   metric: str = "packets_per_second") -> alt.LayerChart:
     """Layer detection markers on the exact windows that produced them."""
     unit = "Packets / s" if metric == "packets_per_second" else "Bytes / s"
-    rows = [{"time": dd.to_datetime(row["window_start"]), "value": row[metric]}
+    rows = [{"time": dd.to_datetime(row["window_start"]), "utc": dd.format_time(row["window_start"]),
+             "value": row[metric]}
             for row in windows]
-    rates = {row["window_start"]: row[metric] for row in windows}
-    markers = [{"time": dd.to_datetime(event["window_start"]),
-                "value": rates.get(event["window_start"], 0), "severity": event["severity"],
-                "rule": event["rule"], "observed": event["observed"],
-                "threshold": event["threshold"]} for event in events]
-    line = alt.Chart(pd.DataFrame(rows)).mark_line(color="#f5f5f5", strokeWidth=2).encode(
-        x=alt.X("time:T", title="Window start (UTC)"),
-        y=alt.Y("value:Q", title=unit, scale=alt.Scale(zero=True)),
-        tooltip=[alt.Tooltip("time:T", title="Window", format="%Y-%m-%d %H:%M:%S UTC"),
+    markers = dd.event_markers(windows, events, metric)
+    source = alt.Chart(pd.DataFrame(rows))
+    x_axis = alt.X("time:T", title="Window start (UTC)",
+                   scale=alt.Scale(type="utc"), axis=alt.Axis(format="%H:%M:%S", labelAngle=0))
+    y_axis = alt.Y("value:Q", title=unit, scale=alt.Scale(zero=True), axis=alt.Axis(format="~s"))
+    area = source.mark_area(color="#d4d4d4", opacity=0.09).encode(x=x_axis, y=y_axis)
+    line = source.mark_line(color="#f5f5f5", strokeWidth=2).encode(
+        x=x_axis, y=y_axis,
+        tooltip=[alt.Tooltip("utc:N", title="Window"),
                  alt.Tooltip("value:Q", title=unit, format=",.1f")])
-    if not markers:
-        return line.interactive()
-    points = alt.Chart(pd.DataFrame(markers)).mark_point(filled=True, size=90, stroke="#0a0a0a").encode(
+    base = area + line
+    if markers.empty:
+        return base.interactive(bind_y=False)
+    marker_source = alt.Chart(markers)
+    severity_color = alt.Color("severity:N", scale=alt.Scale(
+        domain=["INFO", "WARNING", "HIGH"], range=["#a3a3a3", "#f59e0b", "#ef4444"]),
+        legend=alt.Legend(title=None, orient="top", direction="horizontal"))
+    event_rules = marker_source.mark_rule(strokeDash=[4, 4], opacity=0.7).encode(
+        x="time:T", y=alt.Y("value:Q"), y2=alt.Y2(datum=0),
+        color=severity_color)
+    points = marker_source.mark_point(filled=True, size=95, stroke="#090909", strokeWidth=1.5).encode(
         x="time:T", y="value:Q",
-        color=alt.Color("severity:N", scale=alt.Scale(
-            domain=["INFO", "WARNING", "HIGH"], range=["#a3a3a3", "#f59e0b", "#ef4444"]),
-            legend=alt.Legend(title="Detected event")),
-        tooltip=[alt.Tooltip("time:T", title="Event window", format="%Y-%m-%d %H:%M:%S UTC"),
-                 alt.Tooltip("rule:N", title="Rule"), alt.Tooltip("severity:N", title="Severity"),
-                 alt.Tooltip("observed:Q", title="Observed", format=",.1f"),
-                 alt.Tooltip("threshold:Q", title="Threshold", format=",.1f")])
-    return (line + points).interactive()
+        color=severity_color,
+        size=alt.Size("events:Q", scale=alt.Scale(range=[80, 180]), legend=None),
+        tooltip=[alt.Tooltip("utc:N", title="Event window"),
+                 alt.Tooltip("severity:N", title="Highest severity"),
+                 alt.Tooltip("events:Q", title="Events", format=",d"),
+                 alt.Tooltip("rules:N", title="Rules"),
+                 alt.Tooltip("value:Q", title=unit, format=",.1f")])
+    return (base + event_rules + points).interactive(bind_y=False)
+
+
+def protocol_chart(protocols: dict[str, int]) -> alt.LayerChart:
+    """Compact monochrome packet-share chart with precise tooltips."""
+    frame = dd.protocol_frame(protocols)
+    protocol_sort = alt.SortField(field="share", order="descending")
+    base = alt.Chart(frame).encode(
+        y=alt.Y("protocol:N", title=None, sort=protocol_sort, axis=alt.Axis(labelLimit=110)))
+    bars = base.mark_bar(color="#d4d4d4", cornerRadiusEnd=3).encode(
+        x=alt.X("share:Q", title="Share of stored packets", axis=alt.Axis(format="%"),
+                scale=alt.Scale(domain=[0, 1])),
+        tooltip=[alt.Tooltip("protocol:N", title="Protocol"),
+                 alt.Tooltip("packets:Q", title="Packets", format=",d"),
+                 alt.Tooltip("share:Q", title="Share", format=".1%")])
+    labels = base.mark_text(align="left", baseline="middle", dx=5, color="#f5f5f5").encode(
+        x="share:Q", text="share_label:N")
+    return bars + labels
 
 
 def select_finding_event(run_id: int, event_id: int) -> None:
@@ -114,23 +151,37 @@ def select_finding_event(run_id: int, event_id: int) -> None:
     st.session_state[f"event_picker_{run_id}"] = event_id
 
 
+def render_finding_card(finding: analysis.Finding, run_id: int, index: int) -> None:
+    label = "Detection" if finding.category == "detection" else "Observation"
+    badge_color = {"HIGH": "red", "WARNING": "orange"}.get(finding.severity, "gray")
+    with st.container(border=True, height="stretch", gap="small"):
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.badge(label, color=badge_color)
+            if finding.category == "detection":
+                st.badge(finding.severity.title(), color=badge_color)
+        st.markdown(f"**{finding.title}**")
+        st.caption(finding.summary)
+        if finding.event_id is not None:
+            if st.button("Review evidence", key=f"finding_{run_id}_{finding.event_id}_{index}",
+                         icon=":material/arrow_forward:", type="tertiary"):
+                select_finding_event(run_id, finding.event_id)
+                st.rerun(scope="app")
+
+
 def render_findings(findings: list[analysis.Finding], run_id: int) -> None:
     st.subheader("Key findings")
-    st.caption("Ranked observations from stored measurements. Detection findings are rule matches, not proof of an attack.")
+    st.caption("Highest-priority measured observations. Detection findings are rule matches, not confirmed attacks.")
     if not findings:
         st.info("No material findings were identified from the stored measurements.")
         return
-    for finding in findings:
-        with st.container(border=True):
-            label = "Detection" if finding.category == "detection" else finding.category.capitalize()
-            st.markdown(f"**{finding.title}**  ·  `{label}`  ·  `{finding.severity}`")
-            st.markdown(finding.summary)
-            if finding.investigation:
-                st.caption("Next check: " + finding.investigation)
-            if finding.event_id is not None:
-                st.button("Investigate event", key=f"finding_{run_id}_{finding.event_id}",
-                          icon=":material/arrow_forward:", type="tertiary",
-                          on_click=select_finding_event, args=(run_id, finding.event_id))
+    primary = findings[:3]
+    for index, (column, finding) in enumerate(zip(st.columns(len(primary)), primary)):
+        with column:
+            render_finding_card(finding, run_id, index)
+    if len(findings) > len(primary):
+        with st.expander(f"{len(findings) - len(primary)} more measured observations"):
+            for index, finding in enumerate(findings[len(primary):], start=len(primary)):
+                render_finding_card(finding, run_id, index)
 
 
 def render_overview(db_path: str, run_id: int, live: bool) -> None:
@@ -143,8 +194,13 @@ def render_overview(db_path: str, run_id: int, live: bool) -> None:
         coverage = sum(max(0.0, row["window_end"] - row["window_start"]) for row in windows)
         average_pps = sum(row["packets"] for row in windows) / coverage if coverage else 0.0
         peak_pps = max((row["packets_per_second"] for row in windows), default=0.0)
-        st.subheader(f"Run #{run_id}")
-        st.caption(f"{source_name(run['source'])} · {run['mode'].upper()} · {run['status']} · "
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.subheader(f"Run #{run_id}")
+            status_color = "green" if run["status"] in {"completed", "stopped"} else (
+                "red" if run["status"] == "failed" else "orange")
+            st.badge(run["status"].title(), color=status_color)
+        mode_label = "Live capture" if run["mode"] == "live" else "PCAP replay"
+        st.caption(f"{source_name(run['source'])} · {mode_label} · "
                    f"processing started {dd.format_time(run['started_at'])}")
         metrics = st.columns(4)
         metrics[0].metric("Packets processed", f"{run['packets']:,}", border=True,
@@ -153,14 +209,10 @@ def render_overview(db_path: str, run_id: int, live: bool) -> None:
         metrics[2].metric("Stored-window coverage", dd.human_duration(coverage), border=True,
                           help="Sum of persisted fixed windows, not processing wall-clock time.")
         metrics[3].metric("Detected events", f"{run['events']:,}", border=True,
-                          help="Stored rule matches after cooldown suppression; not confirmed attacks.")
-        metrics = st.columns(4)
-        metrics[0].metric("Average packet rate", f"{average_pps:,.1f} /s", border=True)
-        metrics[1].metric("Peak packet rate", f"{peak_pps:,.1f} /s", border=True)
-        metrics[2].metric("Skipped packets", f"{run['skipped_packets']:,}", border=True,
-                          help="Malformed packets plus live packets dropped when the queue was full.")
-        metrics[3].metric("Cooldown suppressions", f"{run['suppressed_events']:,}", border=True,
-                          help="Repeated rule matches hidden during the configured cooldown.")
+                          help="Rule matches emitted after cooldown handling; not confirmed attacks.")
+        st.caption(f"Average **{average_pps:,.1f} packets/s** · Peak **{peak_pps:,.1f} packets/s** · "
+                   f"Skipped **{run['skipped_packets']:,}** · Cooldown suppressions "
+                   f"**{run['suppressed_events']:,}**")
         if run["storage_errors"]:
             st.warning(f"{run['storage_errors']} traffic window(s) could not be stored.",
                        title="Stored results are incomplete")
@@ -171,47 +223,53 @@ def render_overview(db_path: str, run_id: int, live: bool) -> None:
             return
 
         findings = analysis.generate_findings(run, windows, events, sources, protocols)
-        chart_col, protocol_col = st.columns([3, 1])
+        if run["events"] > len(events):
+            st.warning(f"The overview uses the first {len(events):,} of {run['events']:,} detected events. "
+                       "Exports still include every persisted event.", title="Overview event limit reached")
+        render_findings(findings, run_id)
+        chart_col, protocol_col = st.columns([2.7, 1.3])
         with chart_col.container(border=True):
             st.subheader("Traffic over time")
-            st.caption("Packet rate per stored window; markers show windows that produced detection events.")
-            st.altair_chart(traffic_chart(windows, events), height=330,
+            st.caption("Packet rate per stored window. Markers identify windows with one or more rule matches.")
+            st.altair_chart(traffic_chart(windows, events), height=300,
                             alt="Packet-rate timeline with markers at detected-event windows")
         with protocol_col.container(border=True):
             st.subheader("Protocol distribution")
-            total = max(1, sum(protocols.values()))
-            frame = pd.DataFrame([{"Protocol": name, "Packets": count, "Share": count / total}
-                                  for name, count in protocols.items()])
+            frame = dd.protocol_frame(protocols)
             if frame.empty:
                 st.info("No protocol counts are available.")
             else:
-                st.dataframe(frame, hide_index=True, height=330, alt="Packet totals and shares by protocol",
-                             column_config={"Packets": st.column_config.NumberColumn(format=",%d"),
-                                            "Share": st.column_config.NumberColumn(format="percent")})
+                st.altair_chart(protocol_chart(protocols), height=max(190, min(300, len(frame) * 42)),
+                                alt="Protocol packet shares for stored traffic windows")
+                st.caption(f"{int(frame['packets'].sum()):,} packets represented in stored windows")
 
-        findings_col, events_col = st.columns(2)
-        with findings_col:
-            render_findings(findings, run_id)
-        with events_col:
+        events_col, sources_col = st.columns([1.15, 0.85])
+        with events_col.container(border=True):
             st.subheader("Significant events")
             if events:
                 rank = {"HIGH": 3, "WARNING": 2, "INFO": 1}
                 ranked = sorted(events, key=lambda event: (-rank.get(event["severity"], 0),
                     -(event["observed"] / event["threshold"] if event["threshold"] else 0), event["ts"]))[:8]
-                st.dataframe(dd.events_frame(ranked)[["time", "severity", "rule", "source", "ratio"]],
+                event_frame = dd.events_frame(ranked)
+                event_frame["rule"] = event_frame["rule"].map(dd.rule_label)
+                st.dataframe(event_frame[["time", "severity", "rule", "source", "ratio"]],
                              hide_index=True, alt="Highest-severity detected events",
                              column_config={"time": st.column_config.DatetimeColumn("Time (UTC)", format="HH:mm:ss"),
                                             "ratio": st.column_config.NumberColumn("Observed / threshold", format="%.2f×")})
             else:
                 st.info("No detection events were stored for this run.")
+        with sources_col.container(border=True):
+            st.subheader("Leading tracked sources")
             if sources:
-                st.markdown("**Leading tracked sources**")
                 st.dataframe(dd.sources_frame(sources[:5]), hide_index=True,
                              alt="Leading retained sources by packet count", column_config={
-                                 "src_ip": "Source", "packets": st.column_config.NumberColumn(format=",%d"),
-                                 "bytes": st.column_config.NumberColumn(format=",%d"),
+                                 "src_ip": "Source", "packets": st.column_config.NumberColumn(format="%,d"),
+                                 "bytes": st.column_config.NumberColumn(format="bytes"),
                                  "syn_attempts": "SYN attempts", "max_distinct_ports": "Max ports / window",
                                  "max_distinct_hosts": "Max hosts / window"})
+                st.caption("Retained source summaries; destination diversity is a per-window maximum.")
+            else:
+                st.info("No IP source summaries are stored for this run.")
     body()
 
 
@@ -232,12 +290,13 @@ def render_traffic(db_path: str, run_id: int, live: bool) -> None:
                             alt=f"{rate_view} over time with event markers")
         left, right = st.columns(2)
         with left.container(border=True):
-            st.subheader("Protocols")
-            frame = pd.DataFrame([{"Protocol": name, "Packets": count} for name, count in protocols.items()])
+            st.subheader("Protocol distribution")
+            frame = dd.protocol_frame(protocols)
             if frame.empty:
                 st.info("No protocol counts are available.")
             else:
-                st.bar_chart(frame, x="Protocol", y="Packets", alt="Packets by protocol")
+                st.altair_chart(protocol_chart(protocols), height=max(240, min(380, len(frame) * 45)),
+                                alt="Protocol shares across stored traffic windows")
         with right.container(border=True):
             st.subheader("Tracked sources")
             rank_by = st.segmented_control("Rank by", ["packets", "bytes", "syn_attempts"],
@@ -247,8 +306,8 @@ def render_traffic(db_path: str, run_id: int, live: bool) -> None:
                 st.dataframe(dd.sources_frame(sources), hide_index=True,
                              alt="Retained source summaries ranked by the selected measurement",
                              column_config={"src_ip": "Source IP",
-                                            "packets": st.column_config.NumberColumn(format=",%d"),
-                                            "bytes": st.column_config.NumberColumn(format=",%d"),
+                                            "packets": st.column_config.NumberColumn(format="%,d"),
+                                            "bytes": st.column_config.NumberColumn(format="bytes"),
                                             "syn_attempts": "SYN attempts",
                                             "max_distinct_ports": "Max ports / window",
                                             "max_distinct_hosts": "Max hosts / window"})
@@ -260,26 +319,33 @@ def render_traffic(db_path: str, run_id: int, live: bool) -> None:
             st.dataframe(dd.windows_frame(windows).reset_index(), hide_index=True,
                          alt="All stored traffic-window measurements",
                          column_config={"time": st.column_config.DatetimeColumn("Start (UTC)"),
-                                        "packets_per_second": st.column_config.NumberColumn("Packets / s", format=",.1f"),
-                                        "bytes_per_second": st.column_config.NumberColumn("Bytes / s", format=",.1f")})
+                                        "packets": st.column_config.NumberColumn("Packets", format="%,d"),
+                                        "bytes": st.column_config.NumberColumn("Bytes", format="bytes"),
+                                        "packets_per_second": st.column_config.NumberColumn("Packets / s", format="%,.1f"),
+                                        "bytes_per_second": st.column_config.NumberColumn("Bytes / s", format="%,.1f")})
     body()
 
 
 def render_event_detail(db_path: str, run_id: int, event: dict[str, Any]) -> None:
-    left, middle, right = st.columns(3)
-    left.metric("Observed", f"{event['observed']:g}", help=event["metric"], border=True)
-    middle.metric("Configured threshold", f"{event['threshold']:g}", border=True)
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.subheader("Event evidence")
+        st.badge(event["severity"].title(), color={"HIGH": "red", "WARNING": "orange"}.get(
+            event["severity"], "gray"))
+    left, middle = st.columns(2)
+    left.metric("Observed", dd.measurement_value(event["metric"], event["observed"]), border=True)
+    middle.metric("Threshold", dd.measurement_value(event["metric"], event["threshold"]), border=True)
     ratio = event["observed"] / event["threshold"] if event["threshold"] else float("nan")
-    right.metric("Observed / threshold", f"{ratio:.2f}×", border=True)
+    st.caption(f"Measurement: {dd.metric_label(event['metric'])} · Observed value is {ratio:.2f}× the threshold")
     st.markdown(event["explanation"])
-    details = [f"Severity **{event['severity']}**", f"Rule `{event['rule']}`",
+    details = [f"Rule: **{dd.rule_label(event['rule'])}**",
                f"Window {dd.format_time(event['window_start'])} to {dd.format_time(event['window_end'])}"]
     if event["src_ip"]:
         details.insert(2, f"Source `{event['src_ip']}`")
     st.caption(" · ".join(details))
     if event["dst_info"]:
         st.caption("Destination evidence: " + event["dst_info"])
-    st.info(analysis.investigation_guidance(event), title="Suggested investigation")
+    st.markdown("**Suggested next check**")
+    st.caption(analysis.investigation_guidance(event))
     span = event["window_end"] - event["window_start"]
     rows = read_db(db_path, lambda storage: storage.query_windows(
         run_id, event["window_start"] - span, event["window_end"] + span)) or []
@@ -290,8 +356,10 @@ def render_event_detail(db_path: str, run_id: int, event: dict[str, Any]) -> Non
                      alt="Traffic measurements before, during, and after the selected event",
                      column_config={"window": st.column_config.DatetimeColumn("Window start (UTC)", format="HH:mm:ss"),
                                     "relation": "Position",
-                                    "packets_per_second": st.column_config.NumberColumn("Packets / s", format=",.1f"),
-                                    "bytes_per_second": st.column_config.NumberColumn("Bytes / s", format=",.1f"),
+                                    "packets": st.column_config.NumberColumn("Packets", format="%,d"),
+                                    "bytes": st.column_config.NumberColumn("Bytes", format="bytes"),
+                                    "packets_per_second": st.column_config.NumberColumn("Packets / s", format="%,.1f"),
+                                    "bytes_per_second": st.column_config.NumberColumn("Bytes / s", format="%,.1f"),
                                     "unexpected_packets": "Unexpected packets"})
 
 
@@ -301,11 +369,12 @@ def render_events(db_path: str, run_id: int, live: bool) -> None:
         st.subheader("Anomaly events")
         st.caption("Events are explainable rule matches, not confirmation that an attack occurred.")
         bounds = read_db(db_path, lambda storage: storage.time_bounds(run_id))
-        search = st.text_input("Search events", type="search", placeholder="Rule, source, metric, or evidence",
+        f1, f2, f3 = st.columns([1.35, 1, 0.8])
+        search = f1.text_input("Search", type="search", placeholder="Rule, source, metric, or evidence",
                                key=f"event_search_{run_id}")
-        f1, f2 = st.columns(2)
-        rules = f1.multiselect("Detection rule", list(ALL_RULES), default=list(ALL_RULES), key=f"rules_{run_id}")
-        severities = f2.multiselect("Severity", [severity.value for severity in Severity],
+        rules = f2.multiselect("Rule", list(ALL_RULES), default=list(ALL_RULES),
+                               format_func=dd.rule_label, key=f"rules_{run_id}")
+        severities = f3.multiselect("Severity", [severity.value for severity in Severity],
                                     default=[severity.value for severity in Severity], key=f"sev_{run_id}")
         start = end = None
         if bounds is not None and bounds[1] > bounds[0]:
@@ -313,34 +382,37 @@ def render_events(db_path: str, run_id: int, live: bool) -> None:
             chosen = st.slider("Event time range (UTC)", min_value=lo, max_value=hi, value=(lo, hi),
                                key=f"range_{run_id}_{bounds[0]}_{int(bounds[1] // 60)}", format="HH:mm:ss")
             start, end = chosen[0].timestamp(), chosen[1].timestamp()
-        events = read_db(db_path, lambda storage: storage.query_events(
-            run_id, start, end, rules, severities, limit=2000)) or []
-        if search.strip():
-            needle = search.casefold().strip()
-            fields = ("rule", "severity", "metric", "src_ip", "dst_info", "explanation")
-            events = [event for event in events if needle in " ".join(
-                str(event.get(field) or "") for field in fields).casefold()]
+        result = read_db(db_path, lambda storage: (
+            storage.query_events(run_id, start, end, rules, severities,
+                                 limit=EVENT_UI_LIMIT, search=search),
+            storage.count_events(run_id, start, end, rules, severities, search=search)))
+        events, total = result or ([], 0)
         if not events:
             st.info("No events match the current filters." if bounds else "No events have been stored for this run.")
             return
         frame = dd.events_frame(events)
-        st.caption(f"{len(events):,} matching stored event(s); queries are limited to 2,000 rows.")
-        st.dataframe(frame[["time", "severity", "rule", "source", "metric", "observed", "threshold", "ratio"]],
-                     hide_index=True, alt="Detected events matching the current filters",
-                     column_config={"time": st.column_config.DatetimeColumn("Window end (UTC)", format="HH:mm:ss"),
-                                    "observed": st.column_config.NumberColumn(format=",.1f"),
-                                    "threshold": st.column_config.NumberColumn(format=",.1f"),
-                                    "ratio": st.column_config.NumberColumn("Observed / threshold", format="%.2f×")})
-        st.subheader("Event investigation")
+        frame["rule"] = frame["rule"].map(dd.rule_label)
         by_id = {event["id"]: event for event in events}
         ids = list(by_id)
         preferred = st.session_state.get(f"selected_event_{run_id}")
         selected_id = st.selectbox("Selected event", ids, index=ids.index(preferred) if preferred in ids else 0,
             key=f"event_picker_{run_id}", format_func=lambda event_id: (
                 f"{dd.format_time(by_id[event_id]['ts'])} · {by_id[event_id]['severity']} · "
-                f"{by_id[event_id]['rule']} · {by_id[event_id]['src_ip'] or 'all sources'}"))
+                f"{dd.rule_label(by_id[event_id]['rule'])} · {by_id[event_id]['src_ip'] or 'all sources'}"))
         st.session_state[f"selected_event_{run_id}"] = selected_id
-        render_event_detail(db_path, run_id, by_id[selected_id])
+        list_col, detail_col = st.columns([1.05, 0.95])
+        with list_col.container(border=True):
+            shown = f"Showing {len(events):,} of {total:,} matching events" if total > len(events) else (
+                f"{total:,} matching event{'s' if total != 1 else ''}")
+            st.caption(shown)
+            st.dataframe(frame[["time", "severity", "rule", "source", "ratio"]],
+                         hide_index=True, height=470, alt="Detected events matching the current filters",
+                         column_config={"time": st.column_config.DatetimeColumn("Time (UTC)", format="HH:mm:ss"),
+                                        "ratio": st.column_config.NumberColumn("Observed / threshold", format="%.2f×")})
+            if total > len(events):
+                st.caption(f"The interactive list is limited to {EVENT_UI_LIMIT:,} rows. Exports include all events.")
+        with detail_col.container(border=True):
+            render_event_detail(db_path, run_id, by_id[selected_id])
     body()
 
 
@@ -432,7 +504,7 @@ def render_live_controls(db_path: str, config: Config, config_path: Optional[str
 
 
 def render_exports(db_path: str, run_id: int) -> None:
-    run, windows, events, sources, protocols = load_run_data(db_path, run_id)
+    run, windows, events, sources, protocols = load_export_data(db_path, run_id)
     if run is None:
         return
     findings = analysis.generate_findings(run, windows, events, sources, protocols)
@@ -474,8 +546,8 @@ def render_comparison(db_path: str, run_id: int, runs: list[dict[str, Any]]) -> 
     frame = pd.DataFrame([{"Measurement": label, f"Run #{run_id}": current[key],
                            f"Run #{other_id}": other[key]} for key, label in labels.items()])
     st.dataframe(frame, hide_index=True, alt="Normalized measurements for the two selected runs",
-                 column_config={f"Run #{run_id}": st.column_config.NumberColumn(format=",.2f"),
-                                f"Run #{other_id}": st.column_config.NumberColumn(format=",.2f")})
+                 column_config={f"Run #{run_id}": st.column_config.NumberColumn(format="%,.2f"),
+                                f"Run #{other_id}": st.column_config.NumberColumn(format="%,.2f")})
     names = sorted(set(current_protocols) | set(other_protocols))
     current_total, other_total = sum(current_protocols.values()), sum(other_protocols.values())
     protocols = pd.DataFrame([{"Protocol": name,
@@ -504,7 +576,6 @@ def render_history(db_path: str, run_id: Optional[int], runs: list[dict[str, Any
             st.info("Select or create a run before comparing or exporting results.")
         else:
             render_comparison(db_path, run_id, runs)
-            st.divider()
             render_exports(db_path, run_id)
     elif section == "Live capture":
         render_live_controls(db_path, config, config_path)
@@ -517,9 +588,12 @@ def render_history(db_path: str, run_id: Optional[int], runs: list[dict[str, Any
 
 def render_status(run: dict[str, Any] | None, db_path: str) -> bool:
     kind, message = dd.data_mode(run, seconds_since_write(db_path))
-    renderer = {"live": st.success, "active": st.info, "historical": st.info,
-                "interrupted": st.warning, "partial": st.warning, "failed": st.error, "none": st.info}[kind]
-    renderer(message)
+    if kind == "historical":
+        st.caption(":material/database: " + message)
+    elif kind != "none":
+        renderer = {"live": st.success, "active": st.info, "interrupted": st.warning,
+                    "partial": st.warning, "failed": st.error}[kind]
+        renderer(message)
     notice = st.session_state.pop("replay_notice", None)
     if notice:
         getattr(st, notice[0])(notice[1])
@@ -527,6 +601,24 @@ def render_status(run: dict[str, Any] | None, db_path: str) -> bool:
     if warning:
         st.warning(warning)
     return kind == "live"
+
+
+def render_navigation() -> str:
+    """Render compact native navigation without radio-button affordances."""
+    items = (
+        ("Overview", ":material/dashboard:"),
+        ("Traffic analytics", ":material/query_stats:"),
+        ("Anomaly events", ":material/notification_important:"),
+        ("Captures and history", ":material/history:"),
+    )
+    current = st.session_state.setdefault("view", "Overview")
+    st.caption("Explore")
+    for label, icon in items:
+        if st.button(label, icon=icon, key=f"nav_{label}", width="stretch",
+                     type="primary" if current == label else "tertiary"):
+            st.session_state["view"] = label
+            st.rerun()
+    return current
 
 
 def main() -> None:
@@ -542,31 +634,31 @@ def main() -> None:
         st.stop()
         return
     st.title("Lattice")
-    st.caption("Evidence-based network traffic analysis from packet headers and configurable detection rules")
+    st.caption("Explainable traffic analysis from packet headers and configurable rules")
     with st.sidebar:
         st.markdown("### :material/hub: Lattice")
         st.caption("Network traffic analysis")
-        db_path = st.text_input("Results database", value=os.environ.get("LATTICE_DB") or config.database_path,
-                                help="SQLite database used for processing results.")
+        view = render_navigation()
+        with st.expander("Data source", icon=":material/database:"):
+            db_path = st.text_input("Results database", value=os.environ.get("LATTICE_DB") or config.database_path,
+                                    help="SQLite database used for processing results.")
+            if st.button("Reload results", icon=":material/refresh:", width="stretch"):
+                st.rerun()
         runs = read_db(db_path, lambda storage: storage.list_runs()) or []
         run_id: Optional[int] = None
+        st.caption("Current run")
         if runs:
             ids = [run["id"] for run in runs]
             preferred = st.session_state.get("selected_run")
             index = ids.index(preferred) if preferred in ids else 0
             by_id = {run["id"]: run for run in runs}
-            run_id = st.selectbox("Current run", ids, index=index,
+            run_id = st.selectbox("Current run", ids, index=index, label_visibility="collapsed",
                                   format_func=lambda value: dd.run_label(by_id[value]), key="run_picker")
             st.session_state["selected_run"] = run_id
             selected = by_id[run_id]
             st.caption(f"{selected['packets']:,} processed packets · {selected['events']:,} stored events")
         else:
             st.caption("No stored runs yet.")
-        if st.button("Reload results", icon=":material/refresh:", width="stretch"):
-            st.rerun()
-        st.divider()
-        view = st.radio("Navigation", ["Overview", "Traffic analytics", "Anomaly events", "Captures and history"],
-                        key="view", label_visibility="collapsed")
     run = next((candidate for candidate in runs if candidate["id"] == run_id), None)
     live = render_status(run, db_path)
     if view == "Overview":

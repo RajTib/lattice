@@ -92,7 +92,11 @@ def test_event_roundtrip_and_filters(storage):
                                                   severities=["WARNING"])] == [30]
     assert storage.query_events(run, rules=[]) == []
     assert len(storage.query_events(run, limit=2)) == 2
+    assert len(storage.query_events(run, limit=None)) == 3
+    assert [e["ts"] for e in storage.query_events(run, search="2.2.2.2")] == [20]
+    assert [e["ts"] for e in storage.query_events(run, search="POSSIBLE_PORT")] == [20, 30]
     assert storage.count_events(run, start=15, end=30) == 2
+    assert storage.count_events(run, search="hosts: 9.9.9.9") == 3
     assert storage.count_events(run, rules=["possible_port_scan"], severities=["WARNING"]) == 1
     assert storage.count_events(run, rules=[]) == 0
 

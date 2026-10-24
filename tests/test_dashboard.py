@@ -73,6 +73,29 @@ def test_human_duration_and_event_context():
     assert list(context["protocols"]) == ["TCP 10"] * 3
 
 
+def test_display_frames_keep_units_and_merge_overlapping_event_markers():
+    assert dd.measurement_text("packets_per_second", 1234.5) == "1,234.5 packets/s"
+    assert dd.measurement_text("bytes_per_second", 1536) == "1.5 KiB/s"
+    assert dd.measurement_value("unexpected_packets", 174) == "174"
+    assert dd.metric_label("unexpected_packets") == "Unexpected packets"
+    assert dd.rule_label("possible_port_scan") == "Port scan / host sweep"
+    protocols = dd.protocol_frame({"UDP": 3, "TCP": 1})
+    assert list(protocols["protocol"]) == ["UDP", "TCP"]
+    assert list(protocols["share"]) == [pytest.approx(0.75), pytest.approx(0.25)]
+    assert list(protocols["share_label"]) == ["75.0%", "25.0%"]
+    windows = [{"window_start": 5.0, "packets_per_second": 20.0}]
+    events = [
+        {"window_start": 5.0, "severity": "INFO", "rule": "traffic_spike"},
+        {"window_start": 5.0, "severity": "HIGH", "rule": "possible_port_scan"},
+        {"window_start": 10.0, "severity": "WARNING", "rule": "traffic_spike"},
+    ]
+    markers = dd.event_markers(windows, events, "packets_per_second")
+    assert len(markers) == 1
+    assert markers.iloc[0]["events"] == 2 and markers.iloc[0]["severity"] == "HIGH"
+    assert "Port scan / host sweep" in markers.iloc[0]["rules"]
+    assert markers.iloc[0]["utc"] == "1970-01-01 00:00:05 UTC"
+
+
 @pytest.mark.parametrize("run,age,kind", [
     (None, None, "none"),
     ({"status": "running", "mode": "live"}, 2.0, "live"),
@@ -100,8 +123,8 @@ def run_app(db, cfg, tmp_path, monkeypatch):
 
 
 def open_view(at, name):
-    navigation = next(radio for radio in at.radio if radio.label == "Navigation")
-    navigation.set_value(name).run()
+    navigation = next(button for button in at.button if button.label == name)
+    navigation.click().run()
     return at
 
 
@@ -113,12 +136,12 @@ def test_app_shows_persisted_statistics_and_events(populated, tmp_path, monkeypa
     metrics = {m.label: m.value for m in at.metric}
     assert metrics["Packets processed"] == "350"
     assert metrics["Detected events"] == "4" and metrics["Stored-window coverage"] == "40 s"
-    assert any("PCAP · completed" in caption.value for caption in at.caption)
-    assert "Peak packet rate" in metrics and "Average packet rate" in metrics
-    assert any("Historical" in i.value for i in at.info)       # clearly labelled as stored data
+    assert any("PCAP replay" in caption.value for caption in at.caption)
+    assert any("Average **" in caption.value and "Peak **" in caption.value for caption in at.caption)
+    assert any("Historical" in caption.value for caption in at.caption)
     event_tables = [table.value for table in at.dataframe if "rule" in table.value.columns]
     assert event_tables and any(len(table) == 4 for table in event_tables)
-    investigate = next(button for button in at.button if button.label == "Investigate event")
+    investigate = next(button for button in at.button if button.label == "Review evidence")
     investigate.click().run()
     assert at.session_state["view"] == "Anomaly events"
     context_tables = [table.value for table in at.dataframe if "relation" in table.value.columns]
@@ -133,7 +156,7 @@ def test_event_filters_update_summary_and_inspector(populated, tmp_path, monkeyp
     at.multiselect[0].set_value(["possible_port_scan"]).run()
     assert not at.exception, [e.value for e in at.exception]
     event_tables = [table.value for table in at.dataframe if "rule" in table.value.columns]
-    assert any(set(table["rule"]) == {"possible_port_scan"} for table in event_tables)
+    assert any(set(table["rule"]) == {"Port scan / host sweep"} for table in event_tables)
     event_pickers = [box for box in at.selectbox if box.label == "Selected event"]
     assert len(event_pickers) == 1
 
@@ -169,7 +192,7 @@ def test_dashboard_processes_sample_and_selects_new_run(tmp_path, monkeypatch):
     assert any("2,395 packets" in message.value for message in at.success)
     metrics = {metric.label: metric.value for metric in at.metric}
     assert metrics["Packets processed"] == "2,395"
-    assert any("PCAP · completed" in caption.value for caption in at.caption)
+    assert any("PCAP replay" in caption.value for caption in at.caption)
     with Storage(db, read_only=True) as storage:
         (run,) = storage.list_runs()
     assert run["packets"] == 2395 and run["events"] == 0
@@ -187,6 +210,9 @@ def test_findings_are_evidence_based_and_rank_detections_first(populated):
     assert findings and findings[0].category == "detection"
     assert any(item.event_id in {event["id"] for event in events} for item in findings if item.event_id)
     assert all("attack occurred" not in item.summary.lower() for item in findings)
+    assert all("UTC" in item.summary for item in findings if item.category == "detection")
+    assert any("packets/s" in item.summary or "destination ports" in item.summary
+               for item in findings if item.category == "detection")
 
 
 def test_normalized_metrics_use_window_coverage():
