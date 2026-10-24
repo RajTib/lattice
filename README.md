@@ -130,9 +130,11 @@ Global options such as `--config` and `--db` must appear before the `replay` sub
 python -m lattice --db lattice.db replay capture.pcap --force
 ```
 
-Before replay, Lattice hashes the capture contents together with the window and detection configuration. A completed run with the same fingerprint is reused unless `--force` is supplied. Forced replay replaces earlier completed runs with the same fingerprint.
+Before replay, Lattice hashes the capture contents together with the window and detection configuration and an internal processing-version marker. A completed run with the same fingerprint is reused unless `--force` is supplied. Forced replay keeps existing completed results until the replacement completes successfully, then removes the superseded runs.
 
 Records are sorted by packet timestamp using a stable sort, making results deterministic for a given capture, configuration, and implementation version. The full set of normalized packet records is held in memory during sorting, so large captures require proportionally more memory.
+
+If a capture ends with a reader error after some packets were recovered, Lattice preserves the available results but marks the run `partial` and records the reader error. Partial runs are not reused by duplicate detection. Empty but valid captures complete with zero windows and zero events.
 
 The dashboard can also process a server-local capture path from **Input & controls**. Its sample selector lists captures in `samples/`.
 
@@ -229,6 +231,8 @@ These environment variables are read by `app.py`. For the CLI, use the global `-
 
 The dashboard has no built-in user authentication. Run it in a trusted environment, particularly because its controls can read server-local capture paths and start live monitoring.
 
+Event queries display at most 2,000 matching rows at once and report the complete filtered count. Narrow the rule, severity, or time filters to inspect later events. Configuration is cached by the Streamlit process; restart Streamlit after editing `config.json`.
+
 ## Configuration
 
 `config.json` is loaded by default. Missing keys use built-in defaults, while unknown keys, invalid types, and out-of-range values cause startup to fail with the offending key named.
@@ -279,6 +283,8 @@ Lattice creates four tables:
 
 Each window, its source summaries, its events, and the updated run totals are written in one transaction. Foreign keys use cascading deletion, and file-backed databases use SQLite write-ahead logging so dashboard readers do not block the writer.
 
+Databases carry an application identifier and schema version. Lattice refuses an existing foreign SQLite database and a Lattice database created with an unsupported schema version rather than attempting an unsafe implicit migration.
+
 Create the schema explicitly:
 
 ```bash
@@ -326,9 +332,18 @@ Run the complete test suite:
 python -m pytest
 ```
 
-Tests cover configuration validation, packet parsing, PCAP reading, aggregation, all detection rules, cooldown behavior, SQLite transactions and queries, duplicate replay handling, CLI commands, dashboard data, synthetic evaluation, and live-session lifecycle using a fake sniffer.
+Tests cover configuration validation, packet parsing, PCAP and PCAPNG reading, aggregation, all detection rules, cooldown behavior, SQLite transactions and concurrent reads, duplicate replay handling, CLI commands, dashboard data, synthetic evaluation, and live-session lifecycle using a fake sniffer.
 
-The headless dashboard tests require Streamlit. One live-capture test asks Scapy to start on a deliberately invalid interface to verify failure cleanup; it does not intentionally capture real traffic but still exercises the host capture backend.
+The headless dashboard tests require Streamlit. The host capture-backend check is skipped by default because it starts Scapy's real sniffer on a deliberately invalid interface. Run it only in an authorized environment:
+
+```powershell
+$env:LATTICE_TEST_REAL_CAPTURE = "1"
+python -m pytest tests/test_live.py -k real_sniffer
+```
+
+```bash
+LATTICE_TEST_REAL_CAPTURE=1 python -m pytest tests/test_live.py -k real_sniffer
+```
 
 Generate deterministic sample captures without sending network traffic:
 
