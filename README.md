@@ -134,7 +134,9 @@ Before replay, Lattice hashes the capture contents together with the window and 
 
 Records are sorted by packet timestamp using a stable sort, making results deterministic for a given capture, configuration, and implementation version. The full set of normalized packet records is held in memory during sorting, so large captures require proportionally more memory.
 
-If a capture ends with a reader error after some packets were recovered, Lattice preserves the available results but marks the run `partial` and records the reader error. Partial runs are not reused by duplicate detection. Empty but valid captures complete with zero windows and zero events.
+Before parsing, Lattice walks the record (PCAP) or block (PCAPNG) framing of the file without reading packet data. A file cut off mid-record, such as an interrupted copy or a capture still being written, is therefore detected even though Scapy would silently accept it. A file whose header claims to be a capture but is invalid fails before any run is created.
+
+If a capture is truncated or ends with a reader error after some packets were recovered, Lattice preserves the available results but marks the run `partial` and records the problem in the run note. Partial runs are not reused by duplicate detection. Empty but valid captures complete with zero windows and zero events.
 
 The dashboard can also process a server-local capture path from **Input & controls**. Its sample selector lists captures in `samples/`.
 
@@ -342,7 +344,7 @@ Run the complete test suite:
 python -m pytest
 ```
 
-Tests cover configuration validation, packet parsing, PCAP and PCAPNG reading, aggregation, all detection rules, cooldown behavior, SQLite transactions and concurrent reads, duplicate replay handling, CLI commands, dashboard data, synthetic evaluation, and live-session lifecycle using a fake sniffer.
+Tests cover configuration validation, packet parsing, PCAP and PCAPNG reading (including truncated and invalid files), aggregation checked against an independent recomputation, export consistency with SQLite, all detection rules, cooldown behavior, SQLite transactions and concurrent reads, duplicate replay handling, CLI commands, dashboard data, synthetic evaluation, and live-session lifecycle using a fake sniffer.
 
 The headless dashboard tests require Streamlit. The host capture-backend check is skipped by default because it starts Scapy's real sniffer on a deliberately invalid interface. Run it only in an authorized environment:
 
@@ -385,7 +387,11 @@ The generated scenarios verify expected behavior under controlled inputs. They d
 - Source tracking is bounded. Packets from sources beyond `window.max_sources_per_window` remain in window totals but do not contribute to per-source SYN or scan rules.
 - Only `window.top_talkers` source summaries are stored per window, so dashboard run-wide source rankings are based on those stored summaries rather than every observed source.
 - Unexpected-traffic detection is only as accurate as its allowlists and can be bypassed with an allowed source port.
-- PCAP replay loads normalized records into memory for timestamp sorting.
+- PCAP replay loads normalized records into memory for timestamp sorting (about 220 bytes per packet). Throughput is limited by Scapy's packet dissection: one Windows 11 / Python 3.14 workstation measured about 7,300-7,800 packets/s on a 400,000-packet synthetic TCP/UDP capture (194 MiB, 143 MiB peak working set). A 100 MiB dashboard upload takes on the order of a minute; treat these as single-machine figures, not a general benchmark.
+- Rates are averaged over the whole window, so a burst much shorter than `window.seconds` can stay under a per-second threshold (for example 4,000 packets in 0.2 s reads as 800 packets/s in a 5 s window).
+- Spoofed-source SYN floods are only visible through the traffic-spike rule: once sources exceed `window.max_sources_per_window`, or each source stays under the per-source limits, no per-source event fires. The dashboard reports packets from untracked sources as a data-quality finding.
+- The default `allowed_ports` list is deliberately small. Ordinary LAN traffic (mDNS 5353, SSDP 1900, NetBIOS 137/138, DHCP 67/68, alternate HTTP ports) counts as unexpected and can trigger the unexpected-traffic rule in most windows of a real capture; tune `allowed_ports` for your network before judging that rule.
+- A run left in the `running` state by a killed process is recognised as interrupted only by database-wide inactivity, so it can be mislabelled while another run is actively writing. Ctrl+C and exceptions during replay do close the run as `failed`.
 - Live capture can drop packets when the processing queue is full; drops are counted but cannot be analyzed later.
 - Real-interface live capture has not been validated by the automated test suite.
 - Lattice is a monitoring tool, not an intrusion prevention system, and does not take automated response actions.
