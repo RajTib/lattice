@@ -9,7 +9,7 @@ behaviour starting at t = 60 s):
 
 * ``normal``             background only; no events expected
 * ``rate_spike``         one client suddenly sends ~400 pkt/s of HTTPS data for 10 s
-* ``syn_flood``          one source opens 180 connections to a single port in 5 s
+* ``syn_flood``          one source sends 180 SYNs to a single port in 5 s
 * ``port_scan``          one source SYN-probes 60 distinct ports in 3 s
 * ``host_sweep``         one source SYN-probes 30 distinct destination hosts
 * ``unexpected_protocol`` IP protocol 47 (GRE) from one host
