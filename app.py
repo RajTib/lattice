@@ -340,7 +340,10 @@ def render_event_detail(db_path: str, run_id: int, event: dict[str, Any]) -> Non
     details = [f"Rule: **{dd.rule_label(event['rule'])}**",
                f"Window {dd.format_time(event['window_start'])} to {dd.format_time(event['window_end'])}"]
     if event["src_ip"]:
-        details.insert(2, f"Source `{event['src_ip']}`")
+        # The unexpected-traffic rule counts the whole window; its source is only the
+        # largest contributor, not the origin of every counted packet.
+        label = "Largest contributor" if event["rule"] == "unexpected_protocol_or_port" else "Source"
+        details.insert(2, f"{label} `{event['src_ip']}`")
     st.caption(" · ".join(details))
     if event["dst_info"]:
         st.caption("Destination evidence: " + event["dst_info"])
@@ -381,7 +384,11 @@ def render_events(db_path: str, run_id: int, live: bool) -> None:
             lo, hi = dd.to_datetime(bounds[0]), dd.to_datetime(bounds[1])
             chosen = st.slider("Event time range (UTC)", min_value=lo, max_value=hi, value=(lo, hi),
                                key=f"range_{run_id}_{bounds[0]}_{int(bounds[1] // 60)}", format="HH:mm:ss")
-            start, end = chosen[0].timestamp(), chosen[1].timestamp()
+            # An untouched end of the slider means "no limit": round-tripping the bound
+            # through a microsecond datetime could otherwise exclude an event that sits
+            # exactly on it.
+            start = None if chosen[0] == lo else chosen[0].timestamp()
+            end = None if chosen[1] == hi else chosen[1].timestamp()
         result = read_db(db_path, lambda storage: (
             storage.query_events(run_id, start, end, rules, severities,
                                  limit=EVENT_UI_LIMIT, search=search),
@@ -446,6 +453,8 @@ def render_capture_input(db_path: str, config: Config) -> None:
                         uploaded.name, uploaded.getvalue(), config, storage, force=force_upload)
         except (ValueError, CaptureError, StorageError, OSError) as exc:
             st.error(str(exc), title="Capture could not be analyzed")
+        except Exception as exc:  # the run is already recorded as failed; show why instead of a traceback
+            st.error(f"{type(exc).__name__}: {exc}", title="Capture analysis failed")
         else:
             replay_notice(summary)
             st.rerun()
@@ -463,6 +472,8 @@ def render_capture_input(db_path: str, config: Config) -> None:
                         summary = process_pcap(path, config, storage, force=force)
             except (CaptureError, StorageError) as exc:
                 st.error(str(exc), title="Capture could not be analyzed")
+            except Exception as exc:  # the run is already recorded as failed; show why instead of a traceback
+                st.error(f"{type(exc).__name__}: {exc}", title="Capture analysis failed")
             else:
                 replay_notice(summary)
                 st.rerun()

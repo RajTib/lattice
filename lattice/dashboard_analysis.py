@@ -157,6 +157,33 @@ def generate_findings(
             investigation="Review the run note and skipped/storage-error counters before interpreting results.",
         ))
 
+    processed = max(1, int(run.get("packets") or 0))
+    untracked = sum(int(row.get("untracked_packets") or 0) for row in windows)
+    if untracked:
+        findings.append(Finding(
+            category="data quality",
+            title="Per-source tracking was truncated",
+            summary=(f"{untracked:,} packets ({untracked / processed:.1%} of processed packets) came from "
+                     "sources beyond the per-window tracking limit. They count toward totals and rates but "
+                     "not toward per-source or destination-diversity detections."),
+            significance=94,
+            severity="WARNING",
+            investigation=("Raise window.max_sources_per_window if the capture legitimately has this many "
+                           "sources; a very large number of one-packet sources can also be scattered or "
+                           "spoofed traffic."),
+        ))
+    late = sum(int(row.get("late_packets") or 0) for row in windows)
+    if late:
+        findings.append(Finding(
+            category="data quality",
+            title="Some packets arrived out of order",
+            summary=(f"{late:,} packets carried timestamps before the window being built and were counted "
+                     "in a later window, so those windows' rates are slightly shifted."),
+            significance=93,
+            severity="INFO",
+            investigation="Out-of-order arrival is expected on busy live captures; offline replays are sorted first.",
+        ))
+
     positive_rates = [float(row["packets_per_second"]) for row in windows
                       if float(row["packets_per_second"]) > 0]
     if len(positive_rates) >= 3:

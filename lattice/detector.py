@@ -14,7 +14,8 @@ rule) using ``severity.warning_ratio`` and ``severity.high_ratio``:
 
 Cooldown
 --------
-Events are keyed by ``(rule, source, metric)``. Once emitted, an identical key is
+Events are keyed by ``(rule, source, metric)``; the window-level unexpected
+traffic rule has no source in its key. Once emitted, an identical key is
 suppressed for ``cooldown_seconds`` of event time (window end), unless the new
 event has a higher severity (escalation). Suppressed events are counted in
 ``Detector.suppressed``. Event time, not wall-clock time, is used so replays are
@@ -101,7 +102,11 @@ class Detector:
 
     def _admit(self, event: Event) -> bool:
         cooldown = self._cfg.cooldown_seconds
-        key = (event.rule, event.src_ip, event.metric)
+        # The unexpected-traffic rule is a window-level condition; its src_ip is only
+        # that window's largest contributor, so keying on it would re-report the same
+        # ongoing condition every time the top contributor changes.
+        source = None if event.rule == RULE_UNEXPECTED else event.src_ip
+        key = (event.rule, source, event.metric)
         previous = self._last.get(key)
         if previous is not None and cooldown > 0:
             last_ts, last_rank = previous
