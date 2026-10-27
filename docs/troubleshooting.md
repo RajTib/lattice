@@ -59,6 +59,26 @@ A changed database path does not change the fingerprint, but duplicate lookup oc
 
 Inspect the run note and the skipped/storage-error counters in the dashboard. A partial run can contain useful windows, but totals and findings are provisional. Common causes are a truncated capture, broken record framing, a reader exception late in a capture, or a failed SQLite window transaction. Lattice does not silently upgrade a partial run to completed.
 
+### An included sample file is missing
+
+The tracked `samples/` directory should contain `normal.pcap` and the controlled
+anomaly scenarios described in `evaluation/RESULTS.md`. Confirm that the
+checkout is complete before regenerating anything:
+
+```bash
+git status
+git ls-files samples
+```
+
+The captures can be regenerated deterministically with seed `1234`:
+
+```bash
+python -m scripts.traffic_gen --out samples --seed 1234
+```
+
+Regeneration rewrites the sample files. Do not use it merely to work around a
+misspelled path or an incomplete checkout.
+
 ## Live capture
 
 ### Windows: Npcap is unavailable
@@ -100,12 +120,49 @@ Automated tests do not observe a real interface. On the target host and an autho
 
 3. Do not generate scans or artificial traffic. Let ordinary authorized activity be captured.
 4. Confirm the command exits, reports a `stopped` run, and shows processed/skipped counters.
-5. Start `streamlit run app.py` with `LATTICE_DB` pointing to `live-check.db`; verify that windows, protocol counts, and any rule matches are present and plausible.
+5. Start `python -m streamlit run app.py` with `LATTICE_DB` pointing to `live-check.db`; verify that windows, protocol counts, and any rule matches are present and plausible.
 6. Delete the validation database only after preserving any evidence you need.
 
 This confirms lifecycle and host integration, not detector accuracy.
 
 ## Database and dashboard
+
+### Streamlit does not start
+
+Run it from the repository root and through the active Python environment:
+
+```bash
+python -m streamlit run app.py
+```
+
+If the module is missing, activate the environment used for installation and
+rerun `python -m pip install -r requirements.txt`. If port 8501 is occupied,
+choose another local port:
+
+```bash
+python -m streamlit run app.py --server.port 8502
+```
+
+The project configuration binds to `127.0.0.1`, so use
+`http://localhost:<port>` on the same computer. A remote browser cannot reach
+that loopback listener.
+
+### The dashboard is needed from another computer
+
+Lattice has no authentication and can process server-local capture paths and
+start live capture. Its default loopback-only binding is intentional. Do not
+expose it directly to an untrusted LAN or the internet.
+
+For a deliberate test on a trusted, isolated network, Streamlit can be bound to
+all interfaces:
+
+```bash
+python -m streamlit run app.py --server.address 0.0.0.0
+```
+
+Use host firewall policy and an authenticated reverse proxy for any longer-lived
+shared deployment. Return to the default loopback binding when remote access is
+no longer required.
 
 ### `file is an existing SQLite database that is not a Lattice database`
 
@@ -126,6 +183,14 @@ The dashboard treats a `running` row as interrupted when the database has not be
 ### Source totals do not equal packet totals
 
 This is expected when source tracking is truncated, traffic has no source IP, or a source falls outside the per-window persisted top-talkers. Source tables are summaries, not a complete flow ledger. Overall packet and byte totals come from traffic windows.
+
+### A database is locked or cannot be written
+
+Confirm that the process has permission to create the database and its `-wal`
+and `-shm` sidecar files in the selected directory. Do not place an actively
+written database on a filesystem that does not provide reliable SQLite locking.
+Use a separate writable database for diagnosis rather than resetting an
+existing result store.
 
 ### Capture duration and stored-window coverage differ
 

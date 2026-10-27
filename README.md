@@ -4,6 +4,10 @@ Lattice is a local, passive network traffic analysis tool. It replays PCAP and P
 
 Lattice does not block, modify, or inject traffic. A detection event means that a configured threshold was crossed; it is evidence to investigate, not proof of an attack.
 
+Unlike a packet-list viewer, Lattice turns header metadata into comparable time
+windows, maintains recent traffic baselines, records explainable rule evidence,
+and keeps historical results that can be filtered, compared, and exported.
+
 ## What it provides
 
 - Deterministic replay of PCAP and PCAPNG captures
@@ -30,7 +34,10 @@ The analysis pipeline does not retain packet payloads. Persisted metadata can st
 - [Limitations and safe operation](#limitations-and-safe-operation)
 - [Project layout](#project-layout)
 
-Detailed behavior is documented in the [technical reference](docs/technical-reference.md). For setup and runtime failures, see the [troubleshooting guide](docs/troubleshooting.md).
+Use the [user guide](docs/user-guide.md) for the complete CLI and dashboard
+workflows. Processing semantics, formulas, configuration, and storage are in the
+[technical reference](docs/technical-reference.md). For setup and runtime
+failures, see the [troubleshooting guide](docs/troubleshooting.md).
 
 ## Architecture
 
@@ -111,27 +118,33 @@ python -m pip install -r requirements.txt
 
 ## Quick start
 
-Process all included sample captures into `lattice.db`.
+Process the included normal-traffic sample into `lattice.db`.
 
 Windows PowerShell:
 
 ```powershell
-python -m lattice --db lattice.db replay (Get-ChildItem .\samples\*.pcap).FullName
+python -m lattice --db lattice.db replay .\samples\normal.pcap
 ```
 
 Linux or macOS:
 
 ```bash
-python -m lattice --db lattice.db replay samples/*.pcap
+python -m lattice --db lattice.db replay samples/normal.pcap
 ```
 
 Then start the dashboard:
 
 ```bash
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 Choose a run from the sidebar. Selecting a historical run reads its stored results; it does not replay the capture.
+
+`normal.pcap` contains deterministic background traffic and should produce no
+events with the shipped configuration. To exercise the detector, process
+`samples/rate_spike.pcap` or `samples/port_scan.pcap` into the same database.
+The [user guide](docs/user-guide.md#practical-workflows) provides a complete
+sample-based investigation workflow.
 
 ## Analyze capture files
 
@@ -196,7 +209,7 @@ The dashboard exposes the same live lifecycle under **Captures and history**, wi
 Start Streamlit from the repository root:
 
 ```bash
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 The dashboard listens on `127.0.0.1` only (set in `.streamlit/config.toml`), so it is reachable from the same machine at <http://localhost:8501> but not from other hosts. It has no authentication; if you deliberately need LAN access, pass `--server.address 0.0.0.0` and do so only on a trusted network.
@@ -216,6 +229,10 @@ Event timestamps and exported timestamps are UTC. Run comparison uses stored-win
 
 Interactive event results are capped at 2,000 matching rows. Narrow the filters to inspect a smaller result set. JSON and CSV ZIP exports intentionally query all events for the selected run and include run metadata, findings, windows, events, and retained source summaries.
 
+See the [dashboard guide](docs/user-guide.md#streamlit-dashboard) for the exact
+controls, run states, upload behavior, comparison semantics, export contents,
+and current display limits.
+
 Override dashboard paths with environment variables before starting Streamlit.
 
 Windows PowerShell:
@@ -223,13 +240,13 @@ Windows PowerShell:
 ```powershell
 $env:LATTICE_DB = "C:\captures\lattice.db"
 $env:LATTICE_CONFIG = "C:\captures\config.json"
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 Linux or macOS:
 
 ```bash
-LATTICE_DB=/data/lattice.db LATTICE_CONFIG=/data/config.json streamlit run app.py
+LATTICE_DB=/data/lattice.db LATTICE_CONFIG=/data/config.json python -m streamlit run app.py
 ```
 
 The dashboard caches the loaded configuration for the Streamlit process. Restart it after editing the configuration file.
@@ -249,7 +266,7 @@ Severity is based on `observed / threshold`. By default, values below 2 times th
 
 `config.json` is loaded by default. Use another file with `--config` or `LATTICE_CONFIG`. Missing keys receive built-in defaults, while unknown keys, invalid types, invalid ranges, and inconsistent values fail with a named error.
 
-The shipped file is the complete configuration example. See the [configuration reference](docs/technical-reference.md#configuration-reference) for every key, default, validation rule, aggregation detail, and detector limitation. Thresholds and allowlists must be tuned to the monitored environment; the shipped values are examples, not a universal security policy.
+The shipped file is the complete configuration example. See the [configuration reference](docs/technical-reference.md#configuration-reference) for every key, type, default, validation rule, aggregation detail, and detector limitation. Thresholds and allowlists must be tuned to the monitored environment; the shipped values are examples, not a universal security policy.
 
 ## Storage
 
@@ -316,6 +333,8 @@ The checked-in [evaluation results](evaluation/RESULTS.md) record the seed, conf
 
 ## Limitations and safe operation
 
+- Detection is rule-based, not machine-learning-based. Lattice does not learn a
+  network's normal behavior automatically.
 - Detection is threshold-based and limited to four traffic patterns. Slow, distributed, or below-threshold behavior can be missed, and legitimate bursts can produce events.
 - Scan-related statistics use TCP SYN without ACK only. UDP, ICMP, FIN, NULL, Xmas, and application-layer scans are not detected. Lattice does not infer session state, connection success, malicious intent, or unique attempts.
 - Fixed windows can split activity at a boundary. Rates always divide by the full configured duration, including the final partially populated window; short bursts are averaged across that duration.
@@ -338,6 +357,7 @@ The checked-in [evaluation results](evaluation/RESULTS.md) record the seed, conf
 |-- .streamlit/config.toml     Dashboard theme
 |-- config.json                Shipped runtime configuration
 |-- docs/
+|   |-- user-guide.md          CLI and dashboard workflows
 |   |-- technical-reference.md Processing, rules, configuration, and persistence
 |   `-- troubleshooting.md     Installation and runtime diagnostics
 |-- lattice/                   Core Python package

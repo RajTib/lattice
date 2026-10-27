@@ -2,6 +2,60 @@
 
 This document describes the processing semantics implemented by the current Lattice codebase. The [README](../README.md) contains installation and task-oriented usage.
 
+For commands and dashboard workflows, see the [user guide](user-guide.md).
+
+## System architecture
+
+Offline replay and live capture are input adapters for one shared processing
+pipeline. They differ in ordering and lifecycle: offline replay normalizes all
+records and stably sorts them by packet timestamp, while live capture delivers
+records through a bounded queue and advances idle windows using the system
+clock.
+
+```mermaid
+flowchart LR
+    CFG["Validated config"]
+
+    subgraph Acquisition
+        FILE["PCAP / PCAPNG"] --> READ["PcapReader + framing checks"]
+        NIC["Authorized interface"] --> SNIFF["AsyncSniffer"]
+    end
+
+    READ --> SORT["Normalize + stable timestamp sort"]
+    SNIFF --> QUEUE["Normalize + bounded queue"]
+    SORT --> AGG["Fixed-window aggregator"]
+    QUEUE --> AGG
+    AGG --> DET["Rule detector"]
+    AGG --> SAVE["Atomic window save"]
+    DET --> SAVE
+    SAVE --> DB[("SQLite / WAL")]
+    DB --> UI["Streamlit dashboard"]
+
+    CFG -. "capture" .-> SNIFF
+    CFG -. "window + allowlists" .-> AGG
+    CFG -. "thresholds + cooldown" .-> DET
+    CFG -. "database path" .-> DB
+```
+
+| Module | Responsibility |
+|---|---|
+| `lattice.models` | Scapy-independent packet, window, event, ingest, and run data models |
+| `lattice.capture` | Capture-file framing checks and reading, interface discovery, and asynchronous live sniffing |
+| `lattice.parser` | Header-only normalization from Scapy packets to `PacketRecord` |
+| `lattice.features` | Epoch-aligned fixed windows, protocol totals, source statistics, allowlist classification, and resource bounds |
+| `lattice.detector` | Traffic-spike, SYN-activity, scan/sweep, and unexpected-traffic rules plus severity and cooldown |
+| `lattice.pipeline` | Shared record-to-window-to-event orchestration, duplicate fingerprints, and offline run lifecycle |
+| `lattice.live` | Live worker lifecycle, clock advancement, queue draining, and finalization |
+| `lattice.storage` | SQLite ownership checks, schema, transactions, WAL setup, and result queries |
+| `lattice.dashboard_analysis` | Evidence-backed findings, safe uploads, normalized comparison metrics, and exports |
+| `lattice.dashboard_data` | UTC and unit-aware display transformations |
+| `app.py` | Streamlit navigation, views, controls, and user-visible state |
+
+The `Pipeline` owns one `Aggregator` and one stateful `Detector`. Each finalized
+window is evaluated once and then passed with its events to `Storage.save_window`.
+The dashboard opens short-lived read-only connections; a live worker owns a
+separate writable connection in its thread.
+
 ## Packet acquisition and normalization
 
 ### Offline input
@@ -143,36 +197,36 @@ The unexpected-traffic condition is window-wide. Its event `src_ip` identifies t
 
 `load_config()` reads the repository `config.json` by default. A missing explicit path is an error; if the built-in default path itself is absent, dataclass defaults are used. JSON objects are merged section by section over defaults. Unknown keys, wrong types, non-finite numbers, invalid ranges, and inconsistent severity or baseline settings raise `ConfigError`.
 
-| Key | Default | Validation and effect |
-|---|---:|---|
-| `database.path` | `lattice.db` | Non-empty string; CLI `--db` and dashboard `LATTICE_DB` can override it |
-| `capture.interface` | `null` | String or `null`; default Scapy interface when null |
-| `capture.bpf_filter` | `null` | String or `null`; passed to the live capture backend |
-| `capture.queue_size` | `20000` | Integer at least 1 |
-| `window.seconds` | `5` | Finite number greater than 0 |
-| `window.max_gap_windows` | `12` | Non-negative integer |
-| `window.top_talkers` | `10` | Integer at least 1 |
-| `window.max_sources_per_window` | `5000` | Integer at least 1 |
-| `detection.cooldown_seconds` | `30` | Non-negative finite number |
-| `detection.severity.warning_ratio` | `2.0` | Greater than 1 |
-| `detection.severity.high_ratio` | `5.0` | Greater than `warning_ratio` |
-| `detection.traffic_spike.enabled` | `true` | Boolean |
-| `detection.traffic_spike.pps_threshold` | `1000` | Positive number or `null` |
-| `detection.traffic_spike.bps_threshold` | `1000000` | Positive number or `null` |
-| `detection.traffic_spike.moving_average_multiplier` | `4.0` | Greater than 1 or `null` |
-| `detection.traffic_spike.baseline_windows` | `6` | Integer at least 1 |
-| `detection.traffic_spike.min_baseline_windows` | `3` | Integer from 1 through `baseline_windows` |
-| `detection.traffic_spike.min_baseline_pps` | `1.0` | Positive finite number |
-| `detection.traffic_spike.min_baseline_bps` | `100.0` | Positive finite number |
-| `detection.connection_attempts.enabled` | `true` | Boolean |
-| `detection.connection_attempts.max_syn_per_source` | `100` | Integer at least 1 |
-| `detection.port_scan.enabled` | `true` | Boolean |
-| `detection.port_scan.max_distinct_ports` | `20` | Integer at least 1 |
-| `detection.port_scan.max_distinct_hosts` | `20` | Integer at least 1 or `null` |
-| `detection.unexpected_traffic.enabled` | `true` | Boolean |
-| `detection.unexpected_traffic.max_packets` | `10` | Integer at least 1 |
-| `detection.unexpected_traffic.allowed_protocols` | TCP, UDP, ICMP, ICMPv6, ARP | List whose entries are non-empty strings; an empty list allows no protocols; comparisons are case-insensitive |
-| `detection.unexpected_traffic.allowed_ports` | 22, 53, 80, 123, 443 | List of integers, numeric strings, or inclusive ranges such as `"8000-8100"`; endpoints must be 0 through 65535 |
+| Key | Type | Default | Validation and effect |
+|---|---|---:|---|
+| `database.path` | string | `lattice.db` | Non-empty; CLI `--db` and dashboard `LATTICE_DB` can override it |
+| `capture.interface` | string or `null` | `null` | Uses the configured interface, or Scapy's default when null |
+| `capture.bpf_filter` | string or `null` | `null` | Passed to the live capture backend; syntax support is platform-dependent |
+| `capture.queue_size` | integer | `20000` | At least 1; bounds queued normalized live records |
+| `window.seconds` | number | `5` | Finite and greater than 0; fixes window width and rate denominator |
+| `window.max_gap_windows` | integer | `12` | Non-negative; larger gaps are skipped instead of materialized as empty windows |
+| `window.top_talkers` | integer | `10` | At least 1; number of source rows persisted per window |
+| `window.max_sources_per_window` | integer | `5000` | At least 1; bounds in-memory source-specific aggregation and detection |
+| `detection.cooldown_seconds` | number | `30` | Non-negative finite event-time interval for suppressing equal/lower-severity repeats |
+| `detection.severity.warning_ratio` | number | `2.0` | Finite and greater than 1 |
+| `detection.severity.high_ratio` | number | `5.0` | Finite and greater than `warning_ratio` |
+| `detection.traffic_spike.enabled` | boolean | `true` | Enables packet-rate and byte-rate spike evaluation |
+| `detection.traffic_spike.pps_threshold` | number or `null` | `1000` | Positive finite absolute packet-rate threshold; null disables this condition |
+| `detection.traffic_spike.bps_threshold` | number or `null` | `1000000` | Positive finite absolute byte-rate threshold; null disables this condition |
+| `detection.traffic_spike.moving_average_multiplier` | number or `null` | `4.0` | Greater than 1; null disables the relative condition |
+| `detection.traffic_spike.baseline_windows` | integer | `6` | At least 1; maximum number of preceding rates retained |
+| `detection.traffic_spike.min_baseline_windows` | integer | `3` | From 1 through `baseline_windows`; history required before relative comparison |
+| `detection.traffic_spike.min_baseline_pps` | number | `1.0` | Positive finite floor for an eligible packet-rate baseline |
+| `detection.traffic_spike.min_baseline_bps` | number | `100.0` | Positive finite floor for an eligible byte-rate baseline |
+| `detection.connection_attempts.enabled` | boolean | `true` | Enables per-source SYN-without-ACK counting |
+| `detection.connection_attempts.max_syn_per_source` | integer | `100` | At least 1; fires only when a source's window count is strictly greater |
+| `detection.port_scan.enabled` | boolean | `true` | Enables distinct destination-port and host checks for SYN probes |
+| `detection.port_scan.max_distinct_ports` | integer | `20` | At least 1; strict per-source, per-window threshold |
+| `detection.port_scan.max_distinct_hosts` | integer or `null` | `20` | At least 1; null disables host-sweep evaluation |
+| `detection.unexpected_traffic.enabled` | boolean | `true` | Enables window-wide allowlist evaluation |
+| `detection.unexpected_traffic.max_packets` | integer | `10` | At least 1; strict window-wide threshold |
+| `detection.unexpected_traffic.allowed_protocols` | list of strings | TCP, UDP, ICMP, ICMPv6, ARP | Entries must be non-empty; comparison is case-insensitive; an empty list allows none |
+| `detection.unexpected_traffic.allowed_ports` | list of port entries | 22, 53, 80, 123, 443 | Integers, numeric strings, or inclusive ranges such as `"8000-8100"`; endpoints must be 0 through 65535 |
 
 An enabled traffic-spike rule must retain at least one absolute or relative threshold. Each detection category can otherwise be disabled independently.
 
@@ -194,7 +248,60 @@ The tables are:
 | `source_stats` | Retained top source rows associated with a window |
 | `events` | Admitted detector events with rule, metric, evidence, threshold, and originating window |
 
+```mermaid
+erDiagram
+    runs ||--o{ traffic_stats : contains
+    traffic_stats ||--o{ source_stats : retains
+    runs ||--o{ events : reports
+    traffic_stats ||--o{ events : originates
+
+    runs {
+        integer id PK
+        text mode
+        text status
+        text fingerprint
+        real started_at
+        real finished_at
+    }
+    traffic_stats {
+        integer id PK
+        integer run_id FK
+        real window_start
+        real window_end
+        integer packets
+        integer bytes
+        text protocol_counts
+    }
+    source_stats {
+        integer window_id PK, FK
+        text src_ip PK
+        integer packets
+        integer syn_attempts
+        integer distinct_ports
+        integer distinct_hosts
+    }
+    events {
+        integer id PK
+        integer run_id FK
+        integer window_id FK
+        text rule
+        text severity
+        real observed
+        real threshold
+    }
+```
+
+Foreign keys use cascading deletion, and foreign-key enforcement is enabled on
+every connection. The `(run_id, window_start)` pair is unique for traffic
+windows. Indexes support fingerprint lookup, run/time window queries, run/time
+event queries, and event filtering by rule or severity. SQL filter values use
+bound parameters; dynamic source-sort columns come from a fixed whitelist.
+
 `save_window` inserts the window, retained sources, events, and current run totals in one SQLite transaction. A failed window transaction is logged and increments `storage_errors`; packet processing continues. The run becomes `partial` if the offline reader reported an error or any window failed to store.
+
+Run totals describe successfully processed packets even when a storage failure
+prevents a corresponding window from being committed. For a partial run, the
+sum of stored windows can therefore be lower than the run-level processed total.
 
 User-visible statuses have these meanings:
 
@@ -210,6 +317,9 @@ Run start and finish timestamps use the system clock. Traffic windows and event 
 
 ## Dashboard analytics and exports
 
+The [user guide](user-guide.md#streamlit-dashboard) describes the controls and
+end-user workflows. This section records calculation and retention semantics.
+
 Dashboard averages and comparison rates divide stored window totals by stored-window coverage. Coverage is the sum of every stored window duration, including materialized empty windows. It is not processing time and can differ from wall-clock capture time.
 
 Protocol shares use counts represented in stored traffic windows. Source rankings sum only retained `source_stats` rows. The overview obtains a bounded event list for interactive display; explicit exports retrieve the complete event set.
@@ -220,4 +330,63 @@ statistics that were never tracked or persisted.
 
 The JSON export contains nested run metadata, findings, windows, events, and source summaries. The CSV export is a ZIP with separate CSV files so different row shapes remain explicit. Protocol counts remain available inside each exported traffic-window row. Timestamps are ISO 8601 UTC values and byte rates remain bytes per second. Source labels are reduced to filenames so exports do not disclose local directory paths.
 
+Explicit export retrieves all event rows rather than applying the interactive
+2,000-row cap. Source export is still bounded: it is derived from the retained
+per-window top talkers and returns at most 1,000 aggregated source rows.
+
+The general dashboard analysis loader reads at most 10,000 events. Overview
+findings warn when this limit is reached. Run comparison currently uses this
+bounded event list when calculating stored events per minute, so that one
+comparison metric can be understated for runs with more than 10,000 events;
+explicit event export remains complete.
+
 Uploaded files receive a suffix and magic-byte check before Scapy parsing. This is a format guard, not a content-security guarantee. Keep the unauthenticated dashboard in a trusted environment.
+
+## Testing and evaluation semantics
+
+Run all automated tests from the repository root:
+
+```bash
+python -m pytest
+```
+
+The suite separates pure processing tests from Streamlit behavior. Parser,
+window, detector, storage, pipeline, and export calculations use ordinary
+pytest assertions. Dashboard workflows use Streamlit's in-process `AppTest` to
+exercise navigation, filters, run selection, capture processing, comparison,
+exports, and error states without a browser. Live lifecycle tests use fake
+threaded sniffers so they do not observe real traffic.
+
+The environment-gated real-backend test is skipped unless
+`LATTICE_TEST_REAL_CAPTURE=1` is set. It verifies clean failure for a deliberately
+invalid interface; it is not a substitute for an authorized real-interface
+validation on the deployment host.
+
+The controlled evaluation is generated with:
+
+```bash
+python -m scripts.evaluate
+```
+
+`scripts.traffic_gen` uses a fixed seed to create eight deterministic capture
+scenarios: ordinary traffic, a rate spike, elevated SYN activity, a port scan,
+a host sweep, an unexpected IP protocol, an unexpected TCP port, and combined
+unexpected traffic. Files are written to disk and replayed through the normal
+parser, aggregator, detector, and SQLite pipeline; no packets are transmitted.
+
+Each injected incident records an expected rule, interval, and optional source.
+It is counted as matched when at least one stored event has the same rule,
+matches the source when specified, and has a window overlapping the injection
+interval. One incident can produce several events, and the port-scan scenario
+intentionally expects both scan and unexpected-port detections. An event that
+matches no injected incident is reported as unmatched by this scenario oracle.
+That term is not a general false-positive-rate estimate.
+
+The optional throughput workload writes seeded background traffic, then times
+capture reading, Scapy normalization, aggregation, detection, and SQLite
+persistence. Capture generation is outside the timed `RunSummary`. Packet and
+event counts are deterministic for a seed and configuration; elapsed time and
+throughput depend on Python, hardware, storage, and current system load. Treat
+the checked-in [evaluation results](../evaluation/RESULTS.md) as a reproducible
+controlled observation, not a performance guarantee or real-world accuracy
+claim.
