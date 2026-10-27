@@ -199,6 +199,8 @@ Start Streamlit from the repository root:
 streamlit run app.py
 ```
 
+The dashboard listens on `127.0.0.1` only (set in `.streamlit/config.toml`), so it is reachable from the same machine at <http://localhost:8501> but not from other hosts. It has no authentication; if you deliberately need LAN access, pass `--server.address 0.0.0.0` and do so only on a trusted network.
+
 The four views are:
 
 | View | Purpose |
@@ -324,7 +326,7 @@ The checked-in [evaluation results](evaluation/RESULTS.md) record the seed, conf
 - The shipped port allowlist is deliberately small. Common LAN services can produce repeated unexpected-traffic events until the allowlist is tuned to the monitored environment.
 - A killed process can leave a `running` row. The dashboard infers interruption from database-wide inactivity, so another active writer can delay that label.
 - Payload inspection, stream reassembly, IP-fragment reassembly, automated response, and prevention are outside the project scope.
-- The dashboard has no authentication. Run it on a trusted host and do not expose it to untrusted users: it can read server-local capture paths and start live capture.
+- The dashboard has no authentication. It binds to loopback by default; do not expose it to untrusted users, because it can read server-local capture paths and start live capture.
 - SQLite files, captures, and exports contain sensitive network metadata. Protect them according to the environment in which they were collected.
 - Automated tests do not validate capture on a real interface. Follow the [manual validation procedure](docs/troubleshooting.md#validate-live-capture-manually) on each target platform.
 

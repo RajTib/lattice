@@ -47,3 +47,12 @@ paddingBottom = "1rem"
 
 [client]
 toolbarMode = "minimal"
+
+[server]
+# The dashboard has no authentication and can read server-local paths and start
+# live capture, so it listens on loopback only. Override with --server.address.
+address = "127.0.0.1"
+maxUploadSize = 100
+
+[browser]
+gatherUsageStats = false

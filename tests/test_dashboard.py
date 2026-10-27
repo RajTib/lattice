@@ -328,3 +328,13 @@ def test_app_reports_corrupt_stored_window(tmp_path, monkeypatch):
     at = run_app(db, cfg, tmp_path, monkeypatch)
     assert not at.exception, [e.value for e in at.exception]
     assert any("Database error" in e.value and "invalid protocol counts" in e.value for e in at.error)
+
+
+def test_streamlit_config_binds_dashboard_to_loopback_only():
+    """The dashboard is unauthenticated, so it must not listen on every interface by default."""
+    tomllib = pytest.importorskip("tomllib")  # Python 3.11+
+    config_file = Path(APP).parent / ".streamlit" / "config.toml"
+    settings = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    assert settings["server"]["address"] == "127.0.0.1"
+    assert settings["server"]["maxUploadSize"] <= 100  # matches the app's own 100 MiB limit
+    assert settings["browser"]["gatherUsageStats"] is False
