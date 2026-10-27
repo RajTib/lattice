@@ -1,7 +1,7 @@
 {
   "seed": 1234,
-  "measured_at": "2026-10-24 15:48:46",
-  "machine": "Windows 11, Python 3.13.5",
+  "measured_at": "2026-10-27 18:32:08",
+  "machine": "Windows 11, Python 3.14.8",
   "window_seconds": 5.0,
   "scenarios": [
     {
@@ -16,8 +16,8 @@
       "false_positive_events": [],
       "events": [],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 1.0422,
-      "packets_per_second_processed": 2298
+      "processing_seconds": 0.3428,
+      "packets_per_second_processed": 6986
     },
     {
       "scenario": "rate_spike",
@@ -50,8 +50,8 @@
         }
       ],
       "suppressed_by_cooldown": 2,
-      "processing_seconds": 2.5434,
-      "packets_per_second_processed": 2527
+      "processing_seconds": 0.8695,
+      "packets_per_second_processed": 7391
     },
     {
       "scenario": "syn_flood",
@@ -75,8 +75,8 @@
         }
       ],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 1.0241,
-      "packets_per_second_processed": 2424
+      "processing_seconds": 0.3514,
+      "packets_per_second_processed": 7063
     },
     {
       "scenario": "port_scan",
@@ -109,8 +109,8 @@
         }
       ],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 1.072,
-      "packets_per_second_processed": 2349
+      "processing_seconds": 0.3548,
+      "packets_per_second_processed": 7097
     },
     {
       "scenario": "host_sweep",
@@ -134,8 +134,8 @@
         }
       ],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 1.0786,
-      "packets_per_second_processed": 2297
+      "processing_seconds": 0.3516,
+      "packets_per_second_processed": 7049
     },
     {
       "scenario": "unexpected_protocol",
@@ -159,8 +159,8 @@
         }
       ],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 1.0848,
-      "packets_per_second_processed": 2213
+      "processing_seconds": 0.3389,
+      "packets_per_second_processed": 7085
     },
     {
       "scenario": "unexpected_port",
@@ -184,8 +184,8 @@
         }
       ],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 0.7906,
-      "packets_per_second_processed": 3077
+      "processing_seconds": 0.341,
+      "packets_per_second_processed": 7136
     },
     {
       "scenario": "unexpected_traffic",
@@ -209,8 +209,8 @@
         }
       ],
       "suppressed_by_cooldown": 0,
-      "processing_seconds": 1.0306,
-      "packets_per_second_processed": 2365
+      "processing_seconds": 0.3522,
+      "packets_per_second_processed": 6919
     }
   ],
   "totals": {
@@ -227,7 +227,7 @@
     "windows": 1000,
     "events": 0,
     "file_mib": 50.72,
-    "processing_seconds": 30.878,
-    "packets_per_second_processed": 3234
+    "processing_seconds": 13.988,
+    "packets_per_second_processed": 7138
   }
 }
