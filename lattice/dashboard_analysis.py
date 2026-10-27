@@ -216,13 +216,13 @@ def generate_findings(
             ))
 
     if sources and int(run.get("packets") or 0) > 0:
-        source = max(sources, key=lambda row: int(row["packets"]))
-        share = int(source["packets"]) / int(run["packets"])
+        top_source = max(sources, key=lambda row: int(row["packets"]))
+        share = int(top_source["packets"]) / int(run["packets"])
         if share >= 0.25:
             findings.append(Finding(
                 category="observation",
                 title="One tracked source contributed a large traffic share",
-                summary=(f"{source['src_ip']} accounts for at least {share:.1%} of processed packets "
+                summary=(f"{top_source['src_ip']} accounts for at least {share:.1%} of processed packets "
                          "in the retained source summaries."),
                 significance=share * 5,
                 investigation="Check whether the source role and transfer volume are expected; the share is a lower bound when source tracking is truncated.",

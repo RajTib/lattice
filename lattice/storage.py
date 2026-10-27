@@ -270,7 +270,8 @@ class Storage:
     @staticmethod
     def _time_clause(start: Optional[float], end: Optional[float], column_lo: str,
                      column_hi: str) -> tuple[str, list[Any]]:
-        clause, params = "", []
+        clause = ""
+        params: list[Any] = []
         if start is not None:
             clause += f" AND {column_hi} > ?"  # columns are fixed literals from callers below
             params.append(start)
@@ -302,7 +303,8 @@ class Storage:
                       rules: Optional[Sequence[str]], severities: Optional[Sequence[str]],
                       search: Optional[str] = None) \
             -> tuple[list[str], list[Any]]:
-        clauses, params = ["1 = 1"], []
+        clauses: list[str] = ["1 = 1"]
+        params: list[Any] = []
         if run_id is not None:
             clauses.append("run_id = ?")
             params.append(run_id)
